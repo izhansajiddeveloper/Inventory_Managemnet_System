@@ -24,5 +24,5 @@ if (session_status() === PHP_SESSION_NONE) {
 }
 
 // Base URL configuration (update this to your project path)
-define('BASE_URL', 'http://localhost/inventory-management-system/');
+define('BASE_URL', 'http://localhost/Inventory_Managemnet_System/');
 define('BASE_PATH', dirname(__DIR__));
