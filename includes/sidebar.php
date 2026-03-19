@@ -436,7 +436,7 @@ $user_name = isset($_SESSION['user_name']) ? $_SESSION['user_name'] : 'Guest';
         <li class="nav-item">
             <a class="nav-link-custom <?= $is_sales_module ? 'active' : '' ?>" data-bs-toggle="collapse" data-bs-target="#saleMgmt" role="button" aria-expanded="<?= $is_sales_module ? 'true' : 'false' ?>" aria-controls="saleMgmt">
                 <i class="fa-solid fa-receipt"></i>
-                <span>Sales Module</span>
+                <span>Sales Management</span>
                 <i class="fa-solid fa-chevron-down chevron"></i>
             </a>
             <div class="collapse <?= $is_sales_module ? 'show' : '' ?>" id="saleMgmt">
@@ -478,7 +478,7 @@ $user_name = isset($_SESSION['user_name']) ? $_SESSION['user_name'] : 'Guest';
                         <li class="submenu-item"><a href="<?= BASE_URL ?>admin/reports/inventory.php" class="<?= ($current_page == 'inventory.php') ? 'active' : '' ?>">Inventory Report</a></li>
                         <li class="submenu-item"><a href="<?= BASE_URL ?>admin/reports/sales.php" class="<?= ($current_page == 'sales.php') ? 'active' : '' ?>">Sales Report</a></li>
                         <li class="submenu-item"><a href="<?= BASE_URL ?>admin/reports/profit.php" class="<?= ($current_page == 'profit.php') ? 'active' : '' ?>">Profit Report</a></li>
-                        <li class="submenu-item"><a href="<?= BASE_URL ?>admin/reports/user_activity.php" class="<?= ($current_page == 'user_activity.php') ? 'active' : '' ?>">User Activity Report</a></li>
+                        <li class="submenu-item"><a href="<?= BASE_URL ?>admin/reports/customer_report.php" class="<?= ($current_page == 'customer_report.php') ? 'active' : '' ?>">Customer Insights</a></li>
                     </ul>
                 </div>
             </li>
