@@ -1,15 +1,42 @@
 <?php
+
 /**
  * Product Management - Delete Product
  */
-require_once __DIR__ . '/../../config/constants.php';
-require_once __DIR__ . '/../../config/db.php';
-require_once __DIR__ . '/../../core/session.php';
-require_once __DIR__ . '/../../core/auth.php';
-require_once __DIR__ . '/../../core/functions.php';
 
-// Access Control
-authorize([ROLE_ADMIN]);
+// Start session if not already started
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
+
+// Include only database config
+require_once __DIR__ . '/../../config/db.php';
+
+// Simple authorization check
+if (!isset($_SESSION['user_id'])) {
+    header("Location: " . BASE_URL . "auth/login.php");
+    exit();
+}
+
+$user_role = $_SESSION['user_role'] ?? 0;
+$allowed_roles = [1]; // Admin only
+
+if (!in_array($user_role, $allowed_roles)) {
+    header("Location: " . BASE_URL . "index.php");
+    exit();
+}
+
+// Helper functions
+function set_flash_message($type, $message)
+{
+    $_SESSION['flash'] = ['type' => $type, 'message' => $message];
+}
+
+function redirect($url)
+{
+    header("Location: " . BASE_URL . $url);
+    exit();
+}
 
 if (!isset($_GET['id']) || !is_numeric($_GET['id'])) {
     set_flash_message('error', 'Invalid product ID.');
@@ -18,30 +45,28 @@ if (!isset($_GET['id']) || !is_numeric($_GET['id'])) {
 
 $product_id = (int)$_GET['id'];
 
-try {
-    // Check if product exists
-    $stmt = $pdo->prepare("SELECT name FROM products WHERE id = ?");
-    $stmt->execute([$product_id]);
-    $product = $stmt->fetch();
+// Check if product exists
+$product_query = "SELECT name FROM products WHERE id = $product_id";
+$product_result = mysqli_query($conn, $product_query);
 
-    if (!$product) {
-        set_flash_message('error', 'Product not found.');
-        redirect('admin/products/index.php');
-    }
+if (!$product_result || mysqli_num_rows($product_result) == 0) {
+    set_flash_message('error', 'Product not found.');
+    redirect('admin/products/index.php');
+}
 
-    // Delete the product
-    $stmt = $pdo->prepare("DELETE FROM products WHERE id = ?");
-    if ($stmt->execute([$product_id])) {
-        set_flash_message('success', 'Product "' . $product['name'] . '" deleted successfully.');
-    } else {
-        set_flash_message('error', 'Failed to delete product. Please try again.');
-    }
-} catch (PDOException $e) {
-    // If there's a foreign key constraint (e.g. if the product is in inventory or orders)
-    if ($e->getCode() == '23000') {
+$product = mysqli_fetch_assoc($product_result);
+
+// Delete the product
+$delete_query = "DELETE FROM products WHERE id = $product_id";
+
+if (mysqli_query($conn, $delete_query)) {
+    set_flash_message('success', 'Product "' . $product['name'] . '" deleted successfully.');
+} else {
+    // Check for foreign key constraint error (MySQL error code 1451)
+    if (mysqli_errno($conn) == 1451) {
         set_flash_message('error', 'This product cannot be deleted because it is linked to other records (inventory or orders).');
     } else {
-        set_flash_message('error', 'Database error: ' . $e->getMessage());
+        set_flash_message('error', 'Database error: ' . mysqli_error($conn));
     }
 }
 

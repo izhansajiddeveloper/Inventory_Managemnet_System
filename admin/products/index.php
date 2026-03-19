@@ -1,64 +1,94 @@
 <?php
+
 /**
  * Product Management - List Products
  */
-require_once __DIR__ . '/../../config/constants.php';
-require_once __DIR__ . '/../../config/db.php';
-require_once __DIR__ . '/../../core/session.php';
-require_once __DIR__ . '/../../core/auth.php';
-require_once __DIR__ . '/../../core/functions.php';
 
-// Access Control
-authorize([ROLE_ADMIN]);
+// Start session if not already started
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
+
+// Include only database config
+require_once __DIR__ . '/../../config/db.php';
+
+// Simple authorization check
+if (!isset($_SESSION['user_id'])) {
+    header("Location: " . BASE_URL . "auth/login.php");
+    exit();
+}
+
+$user_role = $_SESSION['user_role'] ?? 0;
+$allowed_roles = [1]; // Admin only
+
+if (!in_array($user_role, $allowed_roles)) {
+    header("Location: " . BASE_URL . "index.php");
+    exit();
+}
+
+// Helper functions
+function format_price($amount)
+{
+    return 'Rs. ' . number_format($amount, 2);
+}
+
+function set_flash_message($type, $message)
+{
+    $_SESSION['flash'] = ['type' => $type, 'message' => $message];
+}
+
+function display_flash_message()
+{
+    if (isset($_SESSION['flash'])) {
+        $flash = $_SESSION['flash'];
+        $alertClass = $flash['type'] == 'success' ? 'alert-success' : 'alert-danger';
+        echo '<div class="alert ' . $alertClass . ' alert-dismissible fade show rounded-4 shadow-sm mb-4" role="alert">';
+        echo '<i class="fa-solid ' . ($flash['type'] == 'success' ? 'fa-circle-check' : 'fa-circle-exclamation') . ' me-2"></i>';
+        echo $flash['message'];
+        echo '<button type="button" class="btn-close" data-bs-dismiss="alert"></button>';
+        echo '</div>';
+        unset($_SESSION['flash']);
+    }
+}
 
 $page_title = "Products Inventory";
 $page_icon = "fa-boxes-stacked";
 $page_description = "Manage your product catalog, pricing, and stock status";
 
 // Search and Filter Logic
-$search = isset($_GET['search']) ? sanitize($_GET['search']) : '';
-$status_filter = isset($_GET['status']) ? sanitize($_GET['status']) : '';
+$search = isset($_GET['search']) ? mysqli_real_escape_string($conn, $_GET['search']) : '';
+$status_filter = isset($_GET['status']) ? mysqli_real_escape_string($conn, $_GET['status']) : '';
 
 // Pagination
-$limit = ITEMS_PER_PAGE;
+$limit = 10; // ITEMS_PER_PAGE
 $page = isset($_GET['page']) ? (int)$_GET['page'] : 1;
 if ($page < 1) $page = 1;
 $offset = ($page - 1) * $limit;
 
 $query = "SELECT * FROM products WHERE 1=1";
-$params = [];
 
-if ($search) {
-    $query .= " AND (name LIKE ? OR sku LIKE ?)";
-    $params[] = "%$search%";
-    $params[] = "%$search%";
+if (!empty($search)) {
+    $query .= " AND (name LIKE '%$search%' OR sku LIKE '%$search%')";
 }
 
-if ($status_filter) {
-    $query .= " AND status = ?";
-    $params[] = $status_filter;
+if (!empty($status_filter)) {
+    $query .= " AND status = '$status_filter'";
 }
 
 // Get total count for pagination
-try {
-    $count_query = str_replace("SELECT *", "SELECT COUNT(*)", $query);
-    $count_stmt = $pdo->prepare($count_query);
-    $count_stmt->execute($params);
-    $total_items = $count_stmt->fetchColumn();
-    $total_pages = ceil($total_items / $limit);
-} catch (PDOException $e) {
-    $total_items = 0;
-    $total_pages = 0;
-}
+$count_query = str_replace("SELECT *", "SELECT COUNT(*) as total", $query);
+$count_result = mysqli_query($conn, $count_query);
+$total_items = $count_result ? (int)mysqli_fetch_assoc($count_result)['total'] : 0;
+$total_pages = ceil($total_items / $limit);
 
 $query .= " ORDER BY created_at DESC LIMIT $limit OFFSET $offset";
 
-try {
-    $stmt = $pdo->prepare($query);
-    $stmt->execute($params);
-    $products = $stmt->fetchAll();
-} catch (PDOException $e) {
-    $products = [];
+$products = [];
+$result = mysqli_query($conn, $query);
+if ($result) {
+    while ($row = mysqli_fetch_assoc($result)) {
+        $products[] = $row;
+    }
 }
 
 include '../../includes/header.php';
@@ -438,7 +468,7 @@ include '../../includes/navbar.php';
             window.location.href = 'delete.php?id=' + id;
         }
     }
-    document.title = "<?= $page_title ?> - <?= APP_NAME ?>";
+    document.title = "<?= $page_title ?> - Inventory System";
 </script>
 
 <?php include '../../includes/footer.php'; ?>

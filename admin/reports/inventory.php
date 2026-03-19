@@ -1,15 +1,34 @@
 <?php
-
 /**
  * Inventory Report - Fixed with working charts
  */
-require_once __DIR__ . '/../../config/constants.php';
-require_once __DIR__ . '/../../config/db.php';
-require_once __DIR__ . '/../../core/session.php';
-require_once __DIR__ . '/../../core/auth.php';
-require_once __DIR__ . '/../../core/functions.php';
 
-authorize([ROLE_ADMIN]);
+// Start session if not already started
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
+
+// Include only database config
+require_once __DIR__ . '/../../config/db.php';
+
+// Simple authorization check
+if (!isset($_SESSION['user_id'])) {
+    header("Location: " . BASE_URL . "auth/login.php");
+    exit();
+}
+
+$user_role = $_SESSION['user_role'] ?? 0;
+$allowed_roles = [1]; // Admin only
+
+if (!in_array($user_role, $allowed_roles)) {
+    header("Location: " . BASE_URL . "index.php");
+    exit();
+}
+
+// Helper functions
+function format_price($amount) {
+    return 'Rs. ' . number_format($amount, 2);
+}
 
 $page_title = "Inventory Analytics";
 $page_icon = "fa-warehouse";
@@ -45,12 +64,12 @@ $movement_in = [];
 $movement_out = [];
 
 try {
-    if (!$pdo) {
+    if (!$conn) {
         throw new Exception("Database connection failed");
     }
 
     // 1. Core Summary Stats
-    $stats_query = $pdo->query("
+    $stats_query = "
         SELECT 
             COUNT(DISTINCT p.id) as total_products,
             COALESCE(SUM(ps.quantity), 0) as total_units,
@@ -61,11 +80,11 @@ try {
             SUM(CASE WHEN COALESCE(ps.quantity, 0) > 10 THEN 1 ELSE 0 END) as healthy_stock_count
         FROM products p
         LEFT JOIN product_stock ps ON p.id = ps.product_id
-        WHERE p.status = 'active'
-    ");
+        WHERE p.status = 'active'";
 
-    if ($stats_query) {
-        $result = $stats_query->fetch(PDO::FETCH_ASSOC);
+    $stats_result = mysqli_query($conn, $stats_query);
+    if ($stats_result) {
+        $result = mysqli_fetch_assoc($stats_result);
         if ($result) {
             $stats = array_merge($stats, $result);
         }
@@ -77,7 +96,7 @@ try {
     }
 
     // 2. Distributor Statistics
-    $dist_query = $pdo->query("
+    $dist_query = "
         SELECT 
             d.company_name as distributor_name,
             COUNT(DISTINCT p.id) as product_count,
@@ -94,15 +113,17 @@ try {
         JOIN product_stock ps ON p.id = ps.product_id
         WHERE p.status = 'active'
         GROUP BY d.id, d.company_name
-        ORDER BY inventory_value DESC
-    ");
+        ORDER BY inventory_value DESC";
 
-    if ($dist_query) {
-        $distributor_stats = $dist_query->fetchAll();
+    $dist_result = mysqli_query($conn, $dist_query);
+    if ($dist_result) {
+        while ($row = mysqli_fetch_assoc($dist_result)) {
+            $distributor_stats[] = $row;
+        }
     }
 
     // 3. Low Stock Items
-    $low_stock_query = $pdo->query("
+    $low_stock_query = "
         SELECT 
             p.id,
             p.name, 
@@ -123,16 +144,18 @@ try {
         LEFT JOIN product_stock ps ON p.id = ps.product_id
         WHERE p.status = 'active' 
           AND COALESCE(ps.quantity, 0) <= 10
-        ORDER BY COALESCE(ps.quantity, 0) ASC, stock_value DESC
-    ");
+        ORDER BY COALESCE(ps.quantity, 0) ASC, stock_value DESC";
 
-    if ($low_stock_query) {
-        $low_stock = $low_stock_query->fetchAll();
+    $low_stock_result = mysqli_query($conn, $low_stock_query);
+    if ($low_stock_result) {
+        while ($row = mysqli_fetch_assoc($low_stock_result)) {
+            $low_stock[] = $row;
+        }
     }
 
     // 4. Stock Movement from transactions with 30-day padding
     try {
-        $movements_raw = $pdo->query("
+        $movements_raw_query = "
             SELECT 
                 DATE(created_at) as date,
                 SUM(CASE WHEN type = 'IN' THEN quantity ELSE 0 END) as stock_in,
@@ -140,13 +163,16 @@ try {
             FROM product_transactions
             WHERE created_at >= DATE_SUB(CURDATE(), INTERVAL 29 DAY)
             GROUP BY DATE(created_at)
-            ORDER BY date ASC
-        ")->fetchAll(PDO::FETCH_ASSOC);
+            ORDER BY date ASC";
 
+        $movements_raw_result = mysqli_query($conn, $movements_raw_query);
+        
         // Map raw data for easy lookup
         $data_by_date = [];
-        foreach ($movements_raw as $row) {
-            $data_by_date[$row['date']] = $row;
+        if ($movements_raw_result) {
+            while ($row = mysqli_fetch_assoc($movements_raw_result)) {
+                $data_by_date[$row['date']] = $row;
+            }
         }
 
         // Prepare 30 days of data for the chart
@@ -177,7 +203,7 @@ try {
     }
 
     // 5. Top Products by Value
-    $top_products_query = $pdo->query("
+    $top_products_query = "
         SELECT 
             p.name,
             p.sku,
@@ -195,15 +221,17 @@ try {
         LEFT JOIN product_stock ps ON p.id = ps.product_id
         WHERE p.status = 'active'
         ORDER BY total_value DESC
-        LIMIT 10
-    ");
+        LIMIT 10";
 
-    if ($top_products_query) {
-        $top_products = $top_products_query->fetchAll();
+    $top_products_result = mysqli_query($conn, $top_products_query);
+    if ($top_products_result) {
+        while ($row = mysqli_fetch_assoc($top_products_result)) {
+            $top_products[] = $row;
+        }
     }
 
     // 6. Recent Purchases
-    $recent_purchases_query = $pdo->query("
+    $recent_purchases_query = "
         SELECT 
             p.id as purchase_id,
             p.total_amount,
@@ -215,15 +243,17 @@ try {
         LEFT JOIN purchase_items pi ON p.id = pi.purchase_id
         GROUP BY p.id
         ORDER BY p.created_at DESC
-        LIMIT 5
-    ");
+        LIMIT 5";
 
-    if ($recent_purchases_query) {
-        $recent_purchases = $recent_purchases_query->fetchAll();
+    $recent_purchases_result = mysqli_query($conn, $recent_purchases_query);
+    if ($recent_purchases_result) {
+        while ($row = mysqli_fetch_assoc($recent_purchases_result)) {
+            $recent_purchases[] = $row;
+        }
     }
 
     // 7. Recent Orders
-    $recent_orders_query = $pdo->query("
+    $recent_orders_query = "
         SELECT 
             o.id as order_id,
             o.final_amount,
@@ -234,11 +264,13 @@ try {
         LEFT JOIN order_items oi ON o.id = oi.order_id
         GROUP BY o.id
         ORDER BY o.created_at DESC
-        LIMIT 5
-    ");
+        LIMIT 5";
 
-    if ($recent_orders_query) {
-        $recent_orders = $recent_orders_query->fetchAll();
+    $recent_orders_result = mysqli_query($conn, $recent_orders_query);
+    if ($recent_orders_result) {
+        while ($row = mysqli_fetch_assoc($recent_orders_result)) {
+            $recent_orders[] = $row;
+        }
     }
 
     // Prepare stock health data
@@ -251,17 +283,18 @@ try {
     // If all counts are zero, show sample data for demo
     if (array_sum($stock_health_data) == 0 && $stats['total_products'] > 0) {
         // Use actual product data to calculate health
-        $health_query = $pdo->query("
+        $health_query = "
             SELECT 
                 SUM(CASE WHEN COALESCE(ps.quantity, 0) > 5 THEN 1 ELSE 0 END) as healthy,
                 SUM(CASE WHEN COALESCE(ps.quantity, 0) <= 5 AND COALESCE(ps.quantity, 0) > 0 THEN 1 ELSE 0 END) as low,
                 SUM(CASE WHEN COALESCE(ps.quantity, 0) = 0 THEN 1 ELSE 0 END) as out
             FROM products p
             LEFT JOIN product_stock ps ON p.id = ps.product_id
-            WHERE p.status = 'active'
-        ");
-        if ($health_query) {
-            $health = $health_query->fetch(PDO::FETCH_ASSOC);
+            WHERE p.status = 'active'";
+        
+        $health_result = mysqli_query($conn, $health_query);
+        if ($health_result) {
+            $health = mysqli_fetch_assoc($health_result);
             $stock_health_data = [
                 (int)($health['healthy'] ?? 0),
                 (int)($health['low'] ?? 0),
@@ -269,11 +302,8 @@ try {
             ];
         }
     }
-} catch (PDOException $e) {
-    error_log("Inventory Report PDO Error: " . $e->getMessage());
-    $error_message = "Database error: " . $e->getMessage();
 } catch (Exception $e) {
-    error_log("Inventory Report General Error: " . $e->getMessage());
+    error_log("Inventory Report Error: " . $e->getMessage());
     $error_message = "Unable to load inventory report. Please try again later.";
 }
 
@@ -377,9 +407,14 @@ include '../../includes/navbar.php';
 <div class="px-4 py-4">
     <!-- Header -->
     <div class="d-flex flex-wrap align-items-center justify-content-between mb-4 no-print">
-        <div>
-            <h1 class="h3 fw-bold text-slate-800 mb-1"><?= $page_title ?></h1>
-            <p class="text-slate-500 mb-0"><?= $page_description ?></p>
+        <div class="d-flex align-items-center gap-3">
+            <div class="p-3 bg-blue-50 text-blue-600 rounded-4 border border-blue-100">
+                <i class="fa-solid <?= $page_icon ?> fa-xl"></i>
+            </div>
+            <div>
+                <h1 class="h4 fw-bold text-slate-900 mb-0"><?= $page_title ?></h1>
+                <p class="text-slate-500 small mb-0"><?= $page_description ?></p>
+            </div>
         </div>
         <div class="d-flex gap-2 mt-3 mt-sm-0">
             <button class="btn btn-outline-primary rounded-3 px-3" onclick="exportToCSV()">
@@ -587,15 +622,15 @@ include '../../includes/navbar.php';
                             <?php else: ?>
                                 <?php foreach ($distributor_stats as $dist): ?>
                                     <tr>
-                                        <td class="ps-4 fw-medium text-slate-800"><?= htmlspecialchars($dist['distributor_name']) ?></td>
-                                        <td class="text-center text-slate-600"><?= number_format($dist['product_count']) ?></td>
+                                        <td class="ps-4 fw-medium text-slate-800"><?= htmlspecialchars($dist['distributor_name'] ?? 'Unknown') ?></td>
+                                        <td class="text-center text-slate-600"><?= number_format($dist['product_count'] ?? 0) ?></td>
                                         <td class="text-center">
                                             <span class="badge bg-slate-100 text-slate-700 rounded-pill px-3 py-2">
-                                                <?= number_format($dist['total_units']) ?> units
+                                                <?= number_format($dist['total_units'] ?? 0) ?> units
                                             </span>
                                         </td>
-                                        <td class="text-end fw-bold text-slate-800"><?= format_price($dist['inventory_value']) ?></td>
-                                        <td class="text-end pe-4 text-primary fw-bold"><?= format_price($dist['market_value']) ?></td>
+                                        <td class="text-end fw-bold text-slate-800"><?= format_price($dist['inventory_value'] ?? 0) ?></td>
+                                        <td class="text-end pe-4 text-primary fw-bold"><?= format_price($dist['market_value'] ?? 0) ?></td>
                                     </tr>
                                 <?php endforeach; ?>
                             <?php endif; ?>
@@ -815,7 +850,7 @@ include '../../includes/navbar.php';
             $sample_dates = [];
             $sample_in = [];
             $sample_out = [];
-            for ($i = 6; $i >= 0; $i--) {
+            for ($i = 29; $i >= 0; $i--) {
                 $sample_dates[] = date('M d', strtotime("-$i days"));
                 $sample_in[] = rand(8, 25);
                 $sample_out[] = rand(5, 20);

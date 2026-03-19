@@ -4,15 +4,52 @@
  * User Management - Edit User
  * Professional form with consistent design and password hashing
  */
-require_once __DIR__ . '/../../config/constants.php';
-require_once __DIR__ . '/../../config/db.php';
-require_once __DIR__ . '/../../config/app.php';
-require_once __DIR__ . '/../../core/session.php';
-require_once __DIR__ . '/../../core/auth.php';
-require_once __DIR__ . '/../../core/functions.php';
 
-// Access Control
-authorize([ROLE_ADMIN]);
+// Start session if not already started
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
+
+// Include only database config
+require_once __DIR__ . '/../../config/db.php';
+
+// Simple authorization check
+if (!isset($_SESSION['user_id'])) {
+    header("Location: " . BASE_URL . "auth/login.php");
+    exit();
+}
+
+$user_role = $_SESSION['user_role'] ?? 0;
+$allowed_roles = [1]; // Admin only
+
+if (!in_array($user_role, $allowed_roles)) {
+    header("Location: " . BASE_URL . "index.php");
+    exit();
+}
+
+// Helper functions
+function set_flash_message($type, $message)
+{
+    $_SESSION['flash'] = ['type' => $type, 'message' => $message];
+}
+
+function redirect($url)
+{
+    header("Location: " . BASE_URL . $url);
+    exit();
+}
+
+function sanitize($data)
+{
+    global $conn;
+    return mysqli_real_escape_string($conn, htmlspecialchars(trim($data)));
+}
+
+// Define role constants
+define('ROLE_ADMIN', 1);
+define('ROLE_DISTRIBUTOR', 2);
+define('ROLE_STAFF', 3);
+define('ROLE_CUSTOMER', 4);
 
 // Check for ID
 if (!isset($_GET['id']) || !is_numeric($_GET['id'])) {
@@ -23,27 +60,26 @@ if (!isset($_GET['id']) || !is_numeric($_GET['id'])) {
 $user_id = (int)$_GET['id'];
 
 // Fetch user data
-try {
-    $stmt = $pdo->prepare("SELECT u.*, r.name as role_name FROM users u LEFT JOIN roles r ON u.role_id = r.id WHERE u.id = ?");
-    $stmt->execute([$user_id]);
-    $user = $stmt->fetch();
+$user_query = "SELECT u.*, r.name as role_name FROM users u LEFT JOIN roles r ON u.role_id = r.id WHERE u.id = $user_id";
+$user_result = mysqli_query($conn, $user_query);
 
-    if (!$user) {
-        set_flash_message('danger', 'User not found.');
-        redirect('admin/users/index.php');
-    }
-
-    // Set active role for sidebar highlighting
-    $active_role = $user['role_id'];
-} catch (PDOException $e) {
-    die("Database Error: " . $e->getMessage());
+if (!$user_result || mysqli_num_rows($user_result) == 0) {
+    set_flash_message('danger', 'User not found.');
+    redirect('admin/users/index.php');
 }
 
+$user = mysqli_fetch_assoc($user_result);
+
+// Set active role for sidebar highlighting
+$active_role = $user['role_id'];
+
 // Fetch roles
-try {
-    $roles = $pdo->query("SELECT * FROM roles ORDER BY id ASC")->fetchAll();
-} catch (PDOException $e) {
-    $roles = [];
+$roles_result = mysqli_query($conn, "SELECT * FROM roles ORDER BY id ASC");
+$roles = [];
+if ($roles_result) {
+    while ($row = mysqli_fetch_assoc($roles_result)) {
+        $roles[] = $row;
+    }
 }
 
 // Set page title
@@ -60,15 +96,14 @@ $role_icons = [
 $role_icon = $role_icons[$user['role_id']] ?? 'fa-user';
 
 $error = '';
-$success = '';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $name = sanitize($_POST['name']);
-    $email = sanitize($_POST['email']);
-    $phone = sanitize($_POST['phone']);
-    $role_id = (int)$_POST['role_id'];
-    $status = sanitize($_POST['status']);
-    $password = $_POST['password']; // If empty, don't update
+    $name = sanitize($_POST['name'] ?? '');
+    $email = sanitize($_POST['email'] ?? '');
+    $phone = sanitize($_POST['phone'] ?? '');
+    $role_id = (int)($_POST['role_id'] ?? 0);
+    $status = sanitize($_POST['status'] ?? 'active');
+    $password = $_POST['password'] ?? ''; // If empty, don't update
 
     // Validation
     if (empty($name) || empty($email) || empty($role_id)) {
@@ -79,31 +114,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $error = "Password must be at least 3 characters long if provided.";
     } else {
         // Check if email taken by ANOTHER user
-        $stmt = $pdo->prepare("SELECT id FROM users WHERE email = ? AND id != ?");
-        $stmt->execute([$email, $user_id]);
-        if ($stmt->fetch()) {
+        $check_query = "SELECT id FROM users WHERE email = '$email' AND id != $user_id";
+        $check_result = mysqli_query($conn, $check_query);
+        if ($check_result && mysqli_num_rows($check_result) > 0) {
             $error = "This email address is already assigned to another user.";
         } else {
             // Update User
-            try {
-                if (!empty($password)) {
-                    // Hash the new password
-                    $hashed_password = password_hash($password, PASSWORD_DEFAULT);
-                    $stmt = $pdo->prepare("UPDATE users SET name = ?, email = ?, phone = ?, role_id = ?, status = ?, password = ? WHERE id = ?");
-                    $result = $stmt->execute([$name, $email, $phone, $role_id, $status, $hashed_password, $user_id]);
-                } else {
-                    $stmt = $pdo->prepare("UPDATE users SET name = ?, email = ?, phone = ?, role_id = ?, status = ? WHERE id = ?");
-                    $result = $stmt->execute([$name, $email, $phone, $role_id, $status, $user_id]);
-                }
+            if (!empty($password)) {
+                // Hash the new password
+                $hashed_password = password_hash($password, PASSWORD_DEFAULT);
+                $update_query = "UPDATE users SET name = '$name', email = '$email', phone = '$phone', role_id = $role_id, status = '$status', password = '$hashed_password' WHERE id = $user_id";
+            } else {
+                $update_query = "UPDATE users SET name = '$name', email = '$email', phone = '$phone', role_id = $role_id, status = '$status' WHERE id = $user_id";
+            }
 
-                if ($result) {
-                    set_flash_message('success', 'User profile updated successfully.');
-                    redirect('admin/users/index.php');
-                } else {
-                    $error = "Failed to update profile. Please try again.";
-                }
-            } catch (PDOException $e) {
-                $error = "Database Error: " . $e->getMessage();
+            if (mysqli_query($conn, $update_query)) {
+                set_flash_message('success', 'User profile updated successfully.');
+                redirect('admin/users/index.php');
+            } else {
+                $error = "Failed to update profile. Please try again.";
             }
         }
     }
@@ -608,7 +637,7 @@ include '../../includes/navbar.php';
                             </div>
                             <div class="phone-hint">
                                 <i class="fa-regular fa-circle-info"></i>
-                                Optional: Enter 10-digit US number
+                                Optional: Enter 10-digit number
                             </div>
                         </div>
 

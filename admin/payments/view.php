@@ -1,87 +1,133 @@
 <?php
+
 /**
  * View Payment Details
  */
-require_once __DIR__ . '/../../config/constants.php';
-require_once __DIR__ . '/../../config/db.php';
-require_once __DIR__ . '/../../core/session.php';
-require_once __DIR__ . '/../../core/auth.php';
-require_once __DIR__ . '/../../core/functions.php';
 
-// Access Control
-authorize([ROLE_ADMIN, ROLE_STAFF]);
+// Start session if not already started
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
+
+// Include only database config
+require_once __DIR__ . '/../../config/db.php';
+
+// Simple authorization check
+if (!isset($_SESSION['user_id'])) {
+    header("Location: " . BASE_URL . "auth/login.php");
+    exit();
+}
+
+$user_role = $_SESSION['user_role'] ?? 0;
+$allowed_roles = [1, 3]; // Admin and Staff
+
+if (!in_array($user_role, $allowed_roles)) {
+    header("Location: " . BASE_URL . "index.php");
+    exit();
+}
+
+// Helper functions
+function format_price($amount)
+{
+    return 'Rs. ' . number_format($amount, 2);
+}
+
+function set_flash_message($type, $message)
+{
+    $_SESSION['flash'] = ['type' => $type, 'message' => $message];
+}
+
+function display_flash_message()
+{
+    if (isset($_SESSION['flash'])) {
+        $flash = $_SESSION['flash'];
+        $alertClass = $flash['type'] == 'success' ? 'alert-success' : 'alert-danger';
+        echo '<div class="alert ' . $alertClass . ' alert-dismissible fade show rounded-4 shadow-sm mb-4" role="alert">';
+        echo '<i class="fa-solid ' . ($flash['type'] == 'success' ? 'fa-circle-check' : 'fa-circle-exclamation') . ' me-2"></i>';
+        echo $flash['message'];
+        echo '<button type="button" class="btn-close" data-bs-dismiss="alert"></button>';
+        echo '</div>';
+        unset($_SESSION['flash']);
+    }
+}
 
 $payment_id = isset($_GET['id']) ? (int)$_GET['id'] : 0;
 
 if (!$payment_id) {
     set_flash_message('error', "No payment ID provided.");
-    redirect('admin/payments/index.php');
+    header("Location: " . BASE_URL . "admin/payments/index.php");
+    exit();
 }
 
-try {
-    // Unified query: LEFT JOIN both orders and sales; resolve fields with COALESCE
-    $stmt = $pdo->prepare("
-        SELECT p.*,
-               -- Order fields
-               o.id               AS order_ref_id,
-               o.total_amount     AS o_total,
-               o.discount         AS o_discount,
-               o.delivery_charges AS o_delivery,
-               o.final_amount     AS o_final,
-               o.status           AS order_status,
-               o.created_by       AS o_created_by,
-               o.customer_id      AS o_customer_id,
-               -- Sale fields
-               s.id               AS sale_ref_id,
-               s.total_amount     AS s_total,
-               s.discount         AS s_discount,
-               s.final_amount     AS s_final,
-               s.status           AS sale_status,
-               s.created_by       AS s_created_by,
-               s.customer_id      AS s_customer_id,
-               -- Resolved customer (order customer preferred, then sale customer)
-               COALESCE(oc.name,    sc.name)    AS customer_name,
-               COALESCE(oc.email,   sc.email)   AS customer_email,
-               COALESCE(oc.phone,   sc.phone)   AS customer_phone,
-               COALESCE(oc.address, sc.address) AS customer_address,
-               -- Resolved amounts
-               COALESCE(o.total_amount,     s.total_amount)     AS total_amount,
-               COALESCE(o.discount,         s.discount)         AS discount,
-               COALESCE(o.delivery_charges, 0)                  AS delivery_charges,
-               COALESCE(o.final_amount,     s.final_amount)     AS final_amount,
-               -- Cashier
-               COALESCE(ou.name, su.name) AS cashier_name
-        FROM payments p
-        LEFT JOIN orders    o  ON p.order_id = o.id
-        LEFT JOIN sales     s  ON p.sale_id  = s.id
-        LEFT JOIN customers oc ON o.customer_id = oc.id
-        LEFT JOIN customers sc ON s.customer_id = sc.id
-        LEFT JOIN users     ou ON o.created_by  = ou.id
-        LEFT JOIN users     su ON s.created_by  = su.id
-        WHERE p.id = ?
-    ");
-    $stmt->execute([$payment_id]);
-    $payment = $stmt->fetch();
+// Unified query: LEFT JOIN both orders and sales; resolve fields with COALESCE
+$payment_query = "
+    SELECT p.*,
+           -- Order fields
+           o.id               AS order_ref_id,
+           o.total_amount     AS o_total,
+           o.discount         AS o_discount,
+           o.delivery_charges AS o_delivery,
+           o.final_amount     AS o_final,
+           o.status           AS order_status,
+           o.created_by       AS o_created_by,
+           o.customer_id      AS o_customer_id,
+           -- Sale fields
+           s.id               AS sale_ref_id,
+           s.total_amount     AS s_total,
+           s.discount         AS s_discount,
+           s.final_amount     AS s_final,
+           s.status           AS sale_status,
+           s.created_by       AS s_created_by,
+           s.customer_id      AS s_customer_id,
+           -- Resolved customer (order customer preferred, then sale customer)
+           COALESCE(oc.name,    sc.name)    AS customer_name,
+           COALESCE(oc.email,   sc.email)   AS customer_email,
+           COALESCE(oc.phone,   sc.phone)   AS customer_phone,
+           COALESCE(oc.address, sc.address) AS customer_address,
+           -- Resolved amounts
+           COALESCE(o.total_amount,     s.total_amount)     AS total_amount,
+           COALESCE(o.discount,         s.discount)         AS discount,
+           COALESCE(o.delivery_charges, 0)                  AS delivery_charges,
+           COALESCE(o.final_amount,     s.final_amount)     AS final_amount,
+           -- Cashier
+           COALESCE(ou.name, su.name) AS cashier_name
+    FROM payments p
+    LEFT JOIN orders    o  ON p.order_id = o.id
+    LEFT JOIN sales     s  ON p.sale_id  = s.id
+    LEFT JOIN users oc ON o.customer_id = oc.id
+    LEFT JOIN users sc ON s.customer_id = sc.id
+    LEFT JOIN users     ou ON o.created_by  = ou.id
+    LEFT JOIN users     su ON s.created_by  = su.id
+    WHERE p.id = $payment_id";
 
-    if (!$payment) {
-        set_flash_message('error', "Payment record not found.");
-        redirect('admin/payments/index.php');
+$payment_result = mysqli_query($conn, $payment_query);
+
+if (!$payment_result || mysqli_num_rows($payment_result) == 0) {
+    set_flash_message('error', "Payment record not found.");
+    header("Location: " . BASE_URL . "admin/payments/index.php");
+    exit();
+}
+
+$payment = mysqli_fetch_assoc($payment_result);
+
+// Related payments (same order OR same sale)
+$history = [];
+if ($payment['order_ref_id']) {
+    $history_query = "SELECT * FROM payments WHERE order_id = {$payment['order_ref_id']} AND id != $payment_id ORDER BY id DESC";
+    $history_result = mysqli_query($conn, $history_query);
+    if ($history_result) {
+        while ($row = mysqli_fetch_assoc($history_result)) {
+            $history[] = $row;
+        }
     }
-
-    // Related payments (same order OR same sale)
-    $history = [];
-    if ($payment['order_ref_id']) {
-        $h = $pdo->prepare("SELECT * FROM payments WHERE order_id = ? AND id != ? ORDER BY id DESC");
-        $h->execute([$payment['order_ref_id'], $payment_id]);
-        $history = $h->fetchAll();
-    } elseif ($payment['sale_ref_id']) {
-        $h = $pdo->prepare("SELECT * FROM payments WHERE sale_id = ? AND id != ? ORDER BY id DESC");
-        $h->execute([$payment['sale_ref_id'], $payment_id]);
-        $history = $h->fetchAll();
+} elseif ($payment['sale_ref_id']) {
+    $history_query = "SELECT * FROM payments WHERE sale_id = {$payment['sale_ref_id']} AND id != $payment_id ORDER BY id DESC";
+    $history_result = mysqli_query($conn, $history_query);
+    if ($history_result) {
+        while ($row = mysqli_fetch_assoc($history_result)) {
+            $history[] = $row;
+        }
     }
-
-} catch (PDOException $e) {
-    die("Database error: " . $e->getMessage());
 }
 
 $page_title = "Payment Details #PAY-" . str_pad($payment['id'], 5, '0', STR_PAD_LEFT);
@@ -136,16 +182,16 @@ include '../../includes/navbar.php';
                     <span class="fw-bold text-slate-800">#PAY-<?= str_pad($payment['id'], 5, '0', STR_PAD_LEFT) ?></span>
                 </div>
                 <?php if ($payment['order_ref_id']): ?>
-                <div class="d-flex justify-content-between mb-3 border-bottom pb-2">
-                    <span class="text-slate-500 small fw-bold">ORDER ID</span>
-                    <span class="fw-bold text-blue-600"><a href="../orders/view.php?id=<?= $payment['order_ref_id'] ?>">#ORD-<?= str_pad($payment['order_ref_id'], 5, '0', STR_PAD_LEFT) ?></a></span>
-                </div>
+                    <div class="d-flex justify-content-between mb-3 border-bottom pb-2">
+                        <span class="text-slate-500 small fw-bold">ORDER ID</span>
+                        <span class="fw-bold text-blue-600"><a href="../orders/view.php?id=<?= $payment['order_ref_id'] ?>" class="text-decoration-none">#ORD-<?= str_pad($payment['order_ref_id'], 5, '0', STR_PAD_LEFT) ?></a></span>
+                    </div>
                 <?php endif; ?>
                 <?php if ($payment['sale_ref_id']): ?>
-                <div class="d-flex justify-content-between mb-3 border-bottom pb-2">
-                    <span class="text-slate-500 small fw-bold">SALE ID</span>
-                    <span class="fw-bold text-emerald-600"><a href="../sales/view.php?id=<?= $payment['sale_ref_id'] ?>">#SALE-<?= str_pad($payment['sale_ref_id'], 5, '0', STR_PAD_LEFT) ?></a></span>
-                </div>
+                    <div class="d-flex justify-content-between mb-3 border-bottom pb-2">
+                        <span class="text-slate-500 small fw-bold">SALE ID</span>
+                        <span class="fw-bold text-emerald-600"><a href="../sales/view.php?id=<?= $payment['sale_ref_id'] ?>" class="text-decoration-none">#SALE-<?= str_pad($payment['sale_ref_id'], 5, '0', STR_PAD_LEFT) ?></a></span>
+                    </div>
                 <?php endif; ?>
                 <div class="d-flex justify-content-between mb-3 border-bottom pb-2">
                     <span class="text-slate-500 small fw-bold">PAYMENT METHOD</span>
@@ -157,19 +203,19 @@ include '../../includes/navbar.php';
                 </div>
 
                 <?php if ($payment['transaction_id']): ?>
-                <div class="d-flex justify-content-between mb-3 border-bottom pb-2">
-                    <span class="text-slate-500 small fw-bold">TRANSACTION ID</span>
-                    <span class="fw-bold text-slate-800"><?= htmlspecialchars($payment['transaction_id']) ?></span>
-                </div>
+                    <div class="d-flex justify-content-between mb-3 border-bottom pb-2">
+                        <span class="text-slate-500 small fw-bold">TRANSACTION ID</span>
+                        <span class="fw-bold text-slate-800"><?= htmlspecialchars($payment['transaction_id']) ?></span>
+                    </div>
                 <?php endif; ?>
 
                 <?php if ($payment['payment_proof']): ?>
-                <div class="mb-3">
-                    <span class="text-slate-500 small fw-bold d-block mb-2">PAYMENT PROOF</span>
-                    <a href="<?= BASE_URL . $payment['payment_proof'] ?>" target="_blank" class="d-block border rounded-3 overflow-hidden hover-opacity">
-                        <img src="<?= BASE_URL . $payment['payment_proof'] ?>" class="img-fluid" alt="Proof of Payment">
-                    </a>
-                </div>
+                    <div class="mb-3">
+                        <span class="text-slate-500 small fw-bold d-block mb-2">PAYMENT PROOF</span>
+                        <a href="<?= BASE_URL . $payment['payment_proof'] ?>" target="_blank" class="d-block border rounded-3 overflow-hidden hover-opacity">
+                            <img src="<?= BASE_URL . $payment['payment_proof'] ?>" class="img-fluid" alt="Proof of Payment">
+                        </a>
+                    </div>
                 <?php endif; ?>
 
                 <div class="d-flex justify-content-between">
@@ -183,7 +229,7 @@ include '../../includes/navbar.php';
                 <h5 class="fw-bold text-slate-800 mb-4 h6 text-uppercase tracking-wider">Customer Details</h5>
                 <div class="fw-bold text-slate-900 mb-1"><?= htmlspecialchars($payment['customer_name'] ?? 'Walk-in Customer') ?></div>
                 <div class="small text-slate-500 mb-3"><?= htmlspecialchars($payment['customer_phone'] ?? 'No Phone') ?></div>
-                
+
                 <div class="pt-3 border-top">
                     <div class="text-slate-400 small fw-bold mb-1">ADDRESS</div>
                     <div class="small text-slate-700"><?= nl2br(htmlspecialchars($payment['customer_address'] ?? 'N/A')) ?></div>
@@ -221,49 +267,106 @@ include '../../includes/navbar.php';
 
             <!-- Payment History for this order -->
             <?php if (!empty($history)): ?>
-            <div class="bg-white p-4 rounded-4 border border-slate-100 shadow-sm">
-                <h5 class="fw-bold text-slate-800 mb-4 h6 text-uppercase tracking-wider">Related Payments</h5>
-                <div class="table-responsive">
-                    <table class="table align-middle">
-                        <thead class="bg-slate-50 text-slate-500 small uppercase fw-bold">
-                            <tr>
-                                <th>Payment ID</th>
-                                <th>Method</th>
-                                <th class="text-end">Amount Paid</th>
-                                <th class="text-center">Status</th>
-                                <th class="text-end">Date</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <?php foreach ($history as $prev): ?>
+                <div class="bg-white p-4 rounded-4 border border-slate-100 shadow-sm">
+                    <h5 class="fw-bold text-slate-800 mb-4 h6 text-uppercase tracking-wider">Related Payments</h5>
+                    <div class="table-responsive">
+                        <table class="table align-middle">
+                            <thead class="bg-slate-50 text-slate-500 small uppercase fw-bold">
                                 <tr>
-                                    <td class="small fw-bold">#PAY-<?= str_pad($prev['id'], 5, '0', STR_PAD_LEFT) ?></td>
-                                    <td><span class="small uppercase fw-bold text-slate-500"><?= $prev['payment_method'] ?></span></td>
-                                    <td class="text-end fw-bold text-slate-800"><?= format_price($prev['amount']) ?></td>
-                                    <td class="text-center"><span class="status-badge badge-<?= $prev['status'] ?>"><?= ucfirst($prev['status']) ?></span></td>
-                                    <td class="text-end small text-slate-500"><?= date('d M, Y', strtotime($prev['created_at'])) ?></td>
+                                    <th>Payment ID</th>
+                                    <th>Method</th>
+                                    <th class="text-end">Amount Paid</th>
+                                    <th class="text-center">Status</th>
+                                    <th class="text-end">Date</th>
                                 </tr>
-                            <?php endforeach; ?>
-                        </tbody>
-                    </table>
+                            </thead>
+                            <tbody>
+                                <?php foreach ($history as $prev): ?>
+                                    <tr>
+                                        <td class="small fw-bold"><a href="view.php?id=<?= $prev['id'] ?>" class="text-decoration-none text-slate-800">#PAY-<?= str_pad($prev['id'], 5, '0', STR_PAD_LEFT) ?></a></td>
+                                        <td><span class="small uppercase fw-bold text-slate-500"><?= $prev['payment_method'] ?></span></td>
+                                        <td class="text-end fw-bold text-slate-800"><?= format_price($prev['amount']) ?></td>
+                                        <td class="text-center"><span class="status-badge badge-<?= $prev['status'] ?>"><?= ucfirst($prev['status']) ?></span></td>
+                                        <td class="text-end small text-slate-500"><?= date('d M, Y', strtotime($prev['created_at'])) ?></td>
+                                    </tr>
+                                <?php endforeach; ?>
+                            </tbody>
+                        </table>
+                    </div>
                 </div>
-            </div>
             <?php endif; ?>
         </div>
     </div>
 </div>
 
 <style>
-    .status-badge { padding: 0.4rem 0.8rem; border-radius: 8px; font-size: 0.65rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; display: inline-flex; align-items: center; }
-    .badge-paid { background: #ecfdf5; color: #059669; }
-    .badge-partial { background: #fff7ed; color: #ea580c; }
-    .badge-unpaid { background: #fef2f2; color: #dc2626; }
-    
+    .status-badge {
+        padding: 0.4rem 0.8rem;
+        border-radius: 8px;
+        font-size: 0.65rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+        display: inline-flex;
+        align-items: center;
+    }
+
+    .badge-paid {
+        background: #ecfdf5;
+        color: #059669;
+    }
+
+    .badge-partial {
+        background: #fff7ed;
+        color: #ea580c;
+    }
+
+    .badge-unpaid {
+        background: #fef2f2;
+        color: #dc2626;
+    }
+
+    .badge-cash {
+        background: #f1f5f9;
+        color: #475569;
+    }
+
+    .badge-online {
+        background: #eef2ff;
+        color: #4f46e5;
+    }
+
+    .badge-bank {
+        background: #fef3c7;
+        color: #b45309;
+    }
+
+    .badge-card {
+        background: #e0e7ff;
+        color: #4338ca;
+    }
+
     @media print {
-        .includes-sidebar, .includes-navbar, .btn, .d-flex.gap-2 { display: none !important; }
-        .px-3 { padding: 0 !important; }
-        body { background: white !important; }
-        .col-lg-4, .col-lg-8 { width: 100% !important; }
+
+        .includes-sidebar,
+        .includes-navbar,
+        .btn,
+        .d-flex.gap-2 {
+            display: none !important;
+        }
+
+        .px-3 {
+            padding: 0 !important;
+        }
+
+        body {
+            background: white !important;
+        }
+
+        .col-lg-4,
+        .col-lg-8 {
+            width: 100% !important;
+        }
     }
 </style>
 

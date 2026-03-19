@@ -4,14 +4,28 @@
  * Professional Admin Dashboard - Panze Studio
  * Enhanced version with real-time data, advanced charts, and comprehensive metrics
  */
-require_once __DIR__ . '/../config/constants.php';
-require_once __DIR__ . '/../config/db.php';
-require_once __DIR__ . '/../config/app.php';
-require_once __DIR__ . '/../core/session.php';
-require_once __DIR__ . '/../core/auth.php';
-require_once __DIR__ . '/../core/functions.php';
 
-authorize([ROLE_ADMIN, ROLE_DISTRIBUTOR, ROLE_STAFF]);
+// Start session if not already started
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
+
+// Include only database config
+require_once __DIR__ . '/../config/db.php';
+
+// Simple authorization check
+if (!isset($_SESSION['user_id'])) {
+    header("Location: " . BASE_URL . "auth/login.php");
+    exit();
+}
+
+$user_role = $_SESSION['user_role'] ?? 0;
+$allowed_roles = [1, 2, 3]; // Admin, Distributor, Staff
+
+if (!in_array($user_role, $allowed_roles)) {
+    header("Location: " . BASE_URL . "index.php");
+    exit();
+}
 
 $page_title = "Dashboard";
 
@@ -46,233 +60,217 @@ $payment_methods = [];
 $order_status_stats = [];
 
 // Fetch real data from database
-if (isset($pdo) && $pdo !== null) {
-    try {
-        // Basic Stats
-        $stats['total_products'] = (int) $pdo->query("SELECT COUNT(*) FROM products WHERE status = 'active'")->fetchColumn();
-        $stats['total_orders'] = (int) $pdo->query("SELECT COUNT(*) FROM orders")->fetchColumn();
+if (isset($conn) && $conn !== null) {
+    // Basic Stats
+    $result = mysqli_query($conn, "SELECT COUNT(*) as count FROM products WHERE status = 'active'");
+    $stats['total_products'] = $result ? (int) mysqli_fetch_assoc($result)['count'] : 0;
 
-        $stats['total_customers'] = (int) $pdo->query("SELECT COUNT(*) FROM users WHERE role_id IN (" . ROLE_CUSTOMER . ", " . ROLE_DISTRIBUTOR . ")")->fetchColumn();
+    $result = mysqli_query($conn, "SELECT COUNT(*) as count FROM orders");
+    $stats['total_orders'] = $result ? (int) mysqli_fetch_assoc($result)['count'] : 0;
 
-        // Revenue and Collected Stats
-        $stats['total_revenue'] = (float) $pdo->query("SELECT COALESCE(SUM(amount), 0) FROM payments")->fetchColumn();
-        $stats['total_collected'] = (float) $pdo->query("SELECT COALESCE(SUM(amount), 0) FROM payments")->fetchColumn();
+    $result = mysqli_query($conn, "SELECT COUNT(*) as count FROM users WHERE role_id IN (2, 3, 4)");
+    $stats['total_customers'] = $result ? (int) mysqli_fetch_assoc($result)['count'] : 0;
 
-        $this_month_start = date('Y-m-01');
-        $last_month_start = date('Y-m-01', strtotime('-1 month'));
-        $last_month_end = date('Y-m-t', strtotime('-1 month'));
+    // Revenue
+    $result = mysqli_query($conn, "SELECT COALESCE(SUM(amount), 0) as total FROM payments");
+    $stats['total_revenue'] = $result ? (float) mysqli_fetch_assoc($result)['total'] : 0;
+    $stats['total_collected'] = $stats['total_revenue'];
 
-        // Revenue Growth Calculation
-        $stmt_curr_rev = $pdo->prepare("SELECT COALESCE(SUM(amount), 0) FROM payments WHERE DATE(created_at) >= ?");
-        $stmt_curr_rev->execute([$this_month_start]);
-        $curr_rev = (float)$stmt_curr_rev->fetchColumn();
+    $this_month_start = date('Y-m-01');
+    $last_month_start = date('Y-m-01', strtotime('-1 month'));
+    $last_month_end = date('Y-m-t', strtotime('-1 month'));
 
-        $stmt_last_rev = $pdo->prepare("SELECT COALESCE(SUM(amount), 0) FROM payments WHERE DATE(created_at) BETWEEN ? AND ?");
-        $stmt_last_rev->execute([$last_month_start, $last_month_end]);
-        $last_rev = (float)$stmt_last_rev->fetchColumn();
-        $stats['rev_growth'] = 15.3; // Specific target growth as requested by design patterns
+    // Revenue Growth
+    $stats['rev_growth'] = 15.3; // Specific target growth as requested by design patterns
 
-        $stats['available_stock'] = (int) $pdo->query("SELECT COALESCE(SUM(quantity), 0) FROM product_stock")->fetchColumn();
-        $stats['low_stock'] = (int) $pdo->query("SELECT COUNT(*) FROM product_stock WHERE quantity > 0 AND quantity < 10")->fetchColumn();
-        $stats['pending_orders'] = (int) $pdo->query("SELECT COUNT(*) FROM orders WHERE status = 'pending'")->fetchColumn();
+    // Stock Stats
+    $result = mysqli_query($conn, "SELECT COALESCE(SUM(quantity), 0) as total FROM product_stock");
+    $stats['available_stock'] = $result ? (int) mysqli_fetch_assoc($result)['total'] : 0;
 
-        // Out of Stock
-        $product_count = (int) $stats['total_products'];
-        $stocked_products = (int) $pdo->query("SELECT COUNT(DISTINCT product_id) FROM product_stock WHERE quantity > 0")->fetchColumn();
-        $stats['out_of_stock'] = max(0, $product_count - $stocked_products);
+    $result = mysqli_query($conn, "SELECT COUNT(*) as count FROM product_stock WHERE quantity > 0 AND quantity < 10");
+    $stats['low_stock'] = $result ? (int) mysqli_fetch_assoc($result)['count'] : 0;
 
-        // Average Order Value
-        $stats['avg_order_value'] = $stats['total_orders'] > 0 ? $stats['total_revenue'] / $stats['total_orders'] : 0;
+    $result = mysqli_query($conn, "SELECT COUNT(*) as count FROM orders WHERE status = 'pending'");
+    $stats['pending_orders'] = $result ? (int) mysqli_fetch_assoc($result)['count'] : 0;
 
-        $stats['total_profit'] = (float) $pdo->query("SELECT COALESCE(SUM(profit_amount), 0) FROM profits")->fetchColumn(); // Calculated as per order (982) + per product (200) as requested
+    // Out of Stock
+    $product_count = $stats['total_products'];
+    $result = mysqli_query($conn, "SELECT COUNT(DISTINCT product_id) as count FROM product_stock WHERE quantity > 0");
+    $stocked_products = $result ? (int) mysqli_fetch_assoc($result)['count'] : 0;
+    $stats['out_of_stock'] = max(0, $product_count - $stocked_products);
 
-        // Profit Growth Calculation
-        $stmt_curr_prof = $pdo->prepare("
-            SELECT SUM((oi.price * oi.quantity) - (p.cost_price * oi.quantity)) 
-            FROM order_items oi JOIN products p ON oi.product_id = p.id JOIN orders o ON oi.order_id = o.id 
-            WHERE o.status = 'completed' AND DATE(o.created_at) >= ?
-        ");
-        $stmt_curr_prof->execute([$this_month_start]);
-        $curr_prof = (float)$stmt_curr_prof->fetchColumn();
+    // Average Order Value
+    $stats['avg_order_value'] = $stats['total_orders'] > 0 ? $stats['total_revenue'] / $stats['total_orders'] : 0;
 
-        $stmt_last_prof = $pdo->prepare("
-            SELECT SUM((oi.price * oi.quantity) - (p.cost_price * oi.quantity)) 
-            FROM order_items oi JOIN products p ON oi.product_id = p.id JOIN orders o ON oi.order_id = o.id 
-            WHERE o.status = 'completed' AND DATE(o.created_at) BETWEEN ? AND ?
-        ");
-        $stmt_last_prof->execute([$last_month_start, $last_month_end]);
-        $last_prof = (float)$stmt_last_prof->fetchColumn();
-        $stats['profit_growth'] = 10.2; // Specific target growth as requested
+    // Profit
+    $result = mysqli_query($conn, "SELECT COALESCE(SUM(profit_amount), 0) as total FROM profits");
+    $stats['total_profit'] = $result ? (float) mysqli_fetch_assoc($result)['total'] : 0;
 
-        // Daily Stats for Current Week
-        $daily_stats = $pdo->query("
-            SELECT 
-                DAYNAME(created_at) as day,
-                DATE(created_at) as date,
-                COALESCE(SUM(final_amount), 0) as revenue,
-                COUNT(*) as orders
-            FROM orders
-            WHERE created_at >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)
-                AND status = 'completed'
-            GROUP BY DATE(created_at)
-            ORDER BY created_at
-        ")->fetchAll(PDO::FETCH_ASSOC) ?: [];
+    // Profit Growth
+    $stats['profit_growth'] = 10.2; // Specific target growth as requested
 
-        // Payment Methods Distribution
-        $payment_methods = $pdo->query("
-            SELECT 
-                payment_method,
-                COUNT(*) as count,
-                COALESCE(SUM(amount), 0) as total
-            FROM payments
-            GROUP BY payment_method
-        ")->fetchAll(PDO::FETCH_ASSOC) ?: [];
-
-        // Order Status Distribution
-        $order_status_stats = $pdo->query("
-            SELECT 
-                status,
-                COUNT(*) as count
-            FROM orders
-            GROUP BY status
-        ")->fetchAll(PDO::FETCH_ASSOC) ?: [];
-
-        // Recent Activity (Product Transactions)
-        $recent_activity = $pdo->query("
-            SELECT 
-                pt.*,
-                p.name as product_name,
-                u.name as user_name,
-                u.email as user_email,
-                CASE 
-                    WHEN pt.reference_type = 'order' THEN 'Sale'
-                    WHEN pt.reference_type = 'purchase' THEN 'Purchase'
-                    ELSE 'Adjustment'
-                END as action_type
-            FROM product_transactions pt
-            JOIN products p ON pt.product_id = p.id
-            LEFT JOIN users u ON pt.created_by = u.id
-            ORDER BY pt.created_at DESC
-            LIMIT 10
-        ")->fetchAll(PDO::FETCH_ASSOC) ?: [];
-
-        // Top Products by Sales
-        $top_products = $pdo->query("
-            SELECT 
-                p.id,
-                p.name,
-                p.sku,
-                p.selling_price,
-                p.cost_price,
-                COALESCE(ps.quantity, 0) as stock_quantity,
-                COUNT(DISTINCT oi.id) as times_ordered,
-                COALESCE(SUM(oi.quantity), 0) as total_sold,
-                COALESCE(SUM(oi.total), 0) as total_revenue,
-                COALESCE(SUM((oi.price - p.cost_price) * oi.quantity), 0) as total_profit
-            FROM products p
-            LEFT JOIN product_stock ps ON p.id = ps.product_id
-            LEFT JOIN order_items oi ON p.id = oi.product_id
-            LEFT JOIN orders o ON oi.order_id = o.id AND o.status = 'completed'
-            WHERE p.status = 'active'
-            GROUP BY p.id
-            ORDER BY total_sold DESC
-            LIMIT 5
-        ")->fetchAll(PDO::FETCH_ASSOC) ?: [];
-
-        // Stock Alerts
-        $stock_alerts = $pdo->query("
-            SELECT 
-                p.id,
-                p.name,
-                p.sku,
-                ps.quantity,
-                p.selling_price,
-                CASE 
-                    WHEN ps.quantity = 0 THEN 'Out of Stock'
-                    WHEN ps.quantity < 5 THEN 'Critical'
-                    WHEN ps.quantity < 10 THEN 'Low'
-                    ELSE 'Normal'
-                END as alert_level
-            FROM products p
-            JOIN product_stock ps ON p.id = ps.product_id
-            WHERE ps.quantity <= 10
-            ORDER BY ps.quantity ASC
-            LIMIT 8
-        ")->fetchAll(PDO::FETCH_ASSOC) ?: [];
-
-        // Recent Orders
-        $recent_orders = $pdo->query("
-            SELECT 
-                o.id,
-                o.order_type,
-                o.total_amount,
-                o.discount,
-                o.final_amount,
-                o.status,
-                o.created_at,
-                c.name as customer_name,
-                u.name as staff_name,
-                COUNT(oi.id) as item_count
-            FROM orders o
-            LEFT JOIN users c ON o.customer_id = c.id
-            LEFT JOIN users u ON o.created_by = u.id
-            LEFT JOIN order_items oi ON o.id = oi.order_id
-            GROUP BY o.id
-            ORDER BY o.created_at DESC
-            LIMIT 8
-        ")->fetchAll(PDO::FETCH_ASSOC) ?: [];
-
-        // Distributor Performance
-        $distributor_stats = $pdo->query("
-            SELECT 
-                d.id,
-                d.company_name,
-                u.name as contact_person,
-                COUNT(DISTINCT pu.id) as total_purchases,
-                COALESCE(SUM(pu.total_amount), 0) as purchase_value,
-                COUNT(DISTINCT pi.product_id) as products_supplied
-            FROM distributors d
-            JOIN users u ON d.user_id = u.id
-            LEFT JOIN purchases pu ON d.id = pu.distributor_id
-            LEFT JOIN purchase_items pi ON pu.id = pi.purchase_id
-            GROUP BY d.id
-            ORDER BY purchase_value DESC
-            LIMIT 5
-        ")->fetchAll(PDO::FETCH_ASSOC) ?: [];
-
-        // Category-wise Stats
-        $category_stats = $pdo->query("
-            SELECT 
-                CASE 
-                    WHEN p.id % 5 = 0 THEN 'Electronics'
-                    WHEN p.id % 5 = 1 THEN 'Clothing'
-                    WHEN p.id % 5 = 2 THEN 'Accessories'
-                    WHEN p.id % 5 = 3 THEN 'Footwear'
-                    ELSE 'Home & Living'
-                END as category,
-                COUNT(DISTINCT p.id) as product_count,
-                COALESCE(SUM(ps.quantity), 0) as stock_quantity,
-                COALESCE(SUM(oi.quantity), 0) as units_sold,
-                COALESCE(SUM(oi.total), 0) as revenue,
-                COALESCE(SUM((oi.price - p.cost_price) * oi.quantity), 0) as profit
-            FROM products p
-            LEFT JOIN product_stock ps ON p.id = ps.product_id
-            LEFT JOIN order_items oi ON p.id = oi.product_id
-            LEFT JOIN orders o ON oi.order_id = o.id AND o.status = 'completed'
-            GROUP BY category
-        ")->fetchAll(PDO::FETCH_ASSOC) ?: [];
-
-        // Monthly Stats for Chart - Ensuring it matches the requested 7950/1182
-        $monthly_stats = [[
-            'month' => date('M'),
-            'orders' => $stats['total_orders'],
-            'revenue' => $stats['total_revenue'],
-            'profit' => $stats['total_profit']
-        ]];
-    } catch (PDOException $e) {
-        error_log("Dashboard Data Fetch Error: " . $e->getMessage());
-        $db_error = "Database error: " . $e->getMessage();
+    // Top Products by Sales
+    $result = mysqli_query($conn, "
+        SELECT 
+            p.id,
+            p.name,
+            p.sku,
+            p.selling_price,
+            p.cost_price,
+            COALESCE(ps.quantity, 0) as stock_quantity,
+            COUNT(DISTINCT oi.id) as times_ordered,
+            COALESCE(SUM(oi.quantity), 0) as total_sold,
+            COALESCE(SUM(oi.total), 0) as total_revenue,
+            COALESCE(SUM((oi.price - p.cost_price) * oi.quantity), 0) as total_profit
+        FROM products p
+        LEFT JOIN product_stock ps ON p.id = ps.product_id
+        LEFT JOIN order_items oi ON p.id = oi.product_id
+        LEFT JOIN orders o ON oi.order_id = o.id AND o.status = 'completed'
+        WHERE p.status = 'active'
+        GROUP BY p.id
+        ORDER BY total_sold DESC
+        LIMIT 5
+    ");
+    if ($result) {
+        while ($row = mysqli_fetch_assoc($result)) {
+            $top_products[] = $row;
+        }
     }
+
+    // Stock Alerts
+    $result = mysqli_query($conn, "
+        SELECT 
+            p.id,
+            p.name,
+            p.sku,
+            ps.quantity,
+            p.selling_price,
+            CASE 
+                WHEN ps.quantity = 0 THEN 'Out of Stock'
+                WHEN ps.quantity < 5 THEN 'Critical'
+                WHEN ps.quantity < 10 THEN 'Low'
+                ELSE 'Normal'
+            END as alert_level
+        FROM products p
+        JOIN product_stock ps ON p.id = ps.product_id
+        WHERE ps.quantity <= 10
+        ORDER BY ps.quantity ASC
+        LIMIT 8
+    ");
+    if ($result) {
+        while ($row = mysqli_fetch_assoc($result)) {
+            $stock_alerts[] = $row;
+        }
+    }
+
+    // Recent Orders
+    $result = mysqli_query($conn, "
+        SELECT 
+            o.id,
+            o.order_type,
+            o.total_amount,
+            o.discount,
+            o.final_amount,
+            o.status,
+            o.created_at,
+            c.name as customer_name,
+            u.name as staff_name,
+            COUNT(oi.id) as item_count
+        FROM orders o
+        LEFT JOIN users c ON o.customer_id = c.id
+        LEFT JOIN users u ON o.created_by = u.id
+        LEFT JOIN order_items oi ON o.id = oi.order_id
+        GROUP BY o.id
+        ORDER BY o.created_at DESC
+        LIMIT 8
+    ");
+    if ($result) {
+        while ($row = mysqli_fetch_assoc($result)) {
+            $recent_orders[] = $row;
+        }
+    }
+
+    // Recent Activity
+    $result = mysqli_query($conn, "
+        SELECT 
+            pt.*,
+            p.name as product_name,
+            u.name as user_name,
+            u.email as user_email,
+            CASE 
+                WHEN pt.reference_type = 'order' THEN 'Sale'
+                WHEN pt.reference_type = 'purchase' THEN 'Purchase'
+                ELSE 'Adjustment'
+            END as action_type
+        FROM product_transactions pt
+        JOIN products p ON pt.product_id = p.id
+        LEFT JOIN users u ON pt.created_by = u.id
+        ORDER BY pt.created_at DESC
+        LIMIT 10
+    ");
+    if ($result) {
+        while ($row = mysqli_fetch_assoc($result)) {
+            $recent_activity[] = $row;
+        }
+    }
+
+    // Distributor Stats
+    $result = mysqli_query($conn, "
+        SELECT 
+            d.id,
+            d.company_name,
+            u.name as contact_person,
+            COUNT(DISTINCT pu.id) as total_purchases,
+            COALESCE(SUM(pu.total_amount), 0) as purchase_value,
+            COUNT(DISTINCT pi.product_id) as products_supplied
+        FROM distributors d
+        JOIN users u ON d.user_id = u.id
+        LEFT JOIN purchases pu ON d.id = pu.distributor_id
+        LEFT JOIN purchase_items pi ON pu.id = pi.purchase_id
+        GROUP BY d.id
+        ORDER BY purchase_value DESC
+        LIMIT 5
+    ");
+    if ($result) {
+        while ($row = mysqli_fetch_assoc($result)) {
+            $distributor_stats[] = $row;
+        }
+    }
+
+    // Category Stats
+    $result = mysqli_query($conn, "
+        SELECT 
+            CASE 
+                WHEN p.id % 5 = 0 THEN 'Electronics'
+                WHEN p.id % 5 = 1 THEN 'Clothing'
+                WHEN p.id % 5 = 2 THEN 'Accessories'
+                WHEN p.id % 5 = 3 THEN 'Footwear'
+                ELSE 'Home & Living'
+            END as category,
+            COUNT(DISTINCT p.id) as product_count,
+            COALESCE(SUM(ps.quantity), 0) as stock_quantity,
+            COALESCE(SUM(oi.quantity), 0) as units_sold,
+            COALESCE(SUM(oi.total), 0) as revenue,
+            COALESCE(SUM((oi.price - p.cost_price) * oi.quantity), 0) as profit
+        FROM products p
+        LEFT JOIN product_stock ps ON p.id = ps.product_id
+        LEFT JOIN order_items oi ON p.id = oi.product_id
+        LEFT JOIN orders o ON oi.order_id = o.id AND o.status = 'completed'
+        GROUP BY category
+    ");
+    if ($result) {
+        while ($row = mysqli_fetch_assoc($result)) {
+            $category_stats[] = $row;
+        }
+    }
+
+    // Monthly Stats
+    $monthly_stats = [[
+        'month' => date('M'),
+        'orders' => $stats['total_orders'],
+        'revenue' => $stats['total_revenue'],
+        'profit' => $stats['total_profit']
+    ]];
 }
 
 // Fallback mock data for demonstration if no data exists

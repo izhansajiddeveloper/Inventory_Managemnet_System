@@ -7,16 +7,17 @@ $page_title = isset($page_title) ? $page_title : 'Dashboard';
 ?>
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title><?= htmlspecialchars($page_title) ?> - <?= APP_NAME ?></title>
-    
+    <title><?php echo htmlspecialchars($page_title); ?></title>
+
     <!-- Google Fonts: Inter for a clean, professional feel -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-    
+
     <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
@@ -42,13 +43,13 @@ $page_title = isset($page_title) ? $page_title : 'Dashboard';
             }
         }
     </script>
-    
+
     <!-- Bootstrap 5 CSS -->
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
-    
+
     <!-- FontAwesome for Icons -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/all.min.css">
-    
+
     <!-- Custom Theme CSS -->
     <style>
         :root {
@@ -127,8 +128,15 @@ $page_title = isset($page_title) ? $page_title : 'Dashboard';
         }
 
         @keyframes fadeIn {
-            from { opacity: 0; transform: translateY(10px); }
-            to { opacity: 1; transform: translateY(0); }
+            from {
+                opacity: 0;
+                transform: translateY(10px);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
         }
 
         .transition-smooth {
@@ -142,14 +150,23 @@ $page_title = isset($page_title) ? $page_title : 'Dashboard';
         .object-fit-cover {
             object-fit: cover;
         }
-        
+
         /* Pulse for icons */
         @keyframes pulse {
-            0% { transform: scale(1); }
-            50% { transform: scale(1.05); }
-            100% { transform: scale(1); }
+            0% {
+                transform: scale(1);
+            }
+
+            50% {
+                transform: scale(1.05);
+            }
+
+            100% {
+                transform: scale(1);
+            }
         }
     </style>
 </head>
+
 <body>
     <div class="wrapper <?php echo isset($no_sidebar) && $no_sidebar ? 'd-block' : ''; ?>">

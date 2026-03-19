@@ -1,41 +1,28 @@
 <?php
+// config/db.php - Single file for everything
 
-/**
- * Database Connection
- */
+// Database configuration
+$server   = "localhost";
+$username = "root";
+$password = "";
+$database = "inventory_management_system";
 
-// Check if constants are defined, if not include them
-if (!defined('DB_HOST')) {
-    require_once __DIR__ . '/constants.php';
+// Create MySQLi connection
+$conn = mysqli_connect($server, $username, $password, $database);
+
+// Check connection
+if (!$conn) {
+    die("Connection failed: " . mysqli_connect_error());
 }
 
-try {
-    // Create PDO connection
-    $dsn = "mysql:host=" . DB_HOST . ";dbname=" . DB_NAME . ";charset=" . DB_CHARSET . ";port=" . DB_PORT;
-    $options = [
-        PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-        PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
-        PDO::ATTR_EMULATE_PREPARES => false,
-    ];
+// Set charset
+mysqli_set_charset($conn, "utf8mb4");
 
-    $pdo = new PDO($dsn, DB_USER, DB_PASS, $options);
-
-    // Test the connection
-    $pdo->query("SELECT 1");
-} catch (PDOException $e) {
-    // Log error and show user-friendly message
-    error_log("Database Connection Error: " . $e->getMessage());
-
-    if (defined('DEBUG_MODE') && DEBUG_MODE) {
-        die("Database Connection Failed: " . $e->getMessage());
-    } else {
-        die("Unable to connect to the database. Please try again later.");
-    }
+// Start session if not already started
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
 }
 
-// Function to get database connection
-function getDB()
-{
-    global $pdo;
-    return $pdo;
-}
+// Base URL configuration (update this to your project path)
+define('BASE_URL', 'http://localhost/inventory-management-system/');
+define('BASE_PATH', dirname(__DIR__));

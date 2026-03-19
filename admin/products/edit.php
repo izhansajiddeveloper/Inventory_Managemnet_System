@@ -1,15 +1,42 @@
 <?php
+
 /**
  * Product Management - Edit Product
  */
-require_once __DIR__ . '/../../config/constants.php';
-require_once __DIR__ . '/../../config/db.php';
-require_once __DIR__ . '/../../core/session.php';
-require_once __DIR__ . '/../../core/auth.php';
-require_once __DIR__ . '/../../core/functions.php';
 
-// Access Control
-authorize([ROLE_ADMIN]);
+// Start session if not already started
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
+
+// Include only database config
+require_once __DIR__ . '/../../config/db.php';
+
+// Simple authorization check
+if (!isset($_SESSION['user_id'])) {
+    header("Location: " . BASE_URL . "auth/login.php");
+    exit();
+}
+
+$user_role = $_SESSION['user_role'] ?? 0;
+$allowed_roles = [1]; // Admin only
+
+if (!in_array($user_role, $allowed_roles)) {
+    header("Location: " . BASE_URL . "index.php");
+    exit();
+}
+
+// Helper functions
+function set_flash_message($type, $message)
+{
+    $_SESSION['flash'] = ['type' => $type, 'message' => $message];
+}
+
+function redirect($url)
+{
+    header("Location: " . BASE_URL . $url);
+    exit();
+}
 
 // Check for ID
 if (!isset($_GET['id']) || !is_numeric($_GET['id'])) {
@@ -20,32 +47,28 @@ if (!isset($_GET['id']) || !is_numeric($_GET['id'])) {
 $product_id = (int)$_GET['id'];
 
 // Fetch product data
-try {
-    $stmt = $pdo->prepare("SELECT * FROM products WHERE id = ?");
-    $stmt->execute([$product_id]);
-    $product = $stmt->fetch();
+$product_query = "SELECT * FROM products WHERE id = $product_id";
+$product_result = mysqli_query($conn, $product_query);
 
-    if (!$product) {
-        set_flash_message('error', 'Product not found.');
-        redirect('admin/products/index.php');
-    }
-} catch (PDOException $e) {
-    die("Database Error: " . $e->getMessage());
+if (!$product_result || mysqli_num_rows($product_result) == 0) {
+    set_flash_message('error', 'Product not found.');
+    redirect('admin/products/index.php');
 }
+
+$product = mysqli_fetch_assoc($product_result);
 
 $page_title = "Edit Product: " . htmlspecialchars($product['name']);
 $page_icon = "fa-pen-to-square";
 $page_description = "Update the details for " . htmlspecialchars($product['name']);
 
 $error = '';
-$success = '';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $name = sanitize($_POST['name']);
-    $sku = sanitize($_POST['sku']);
-    $cost_price = (float)$_POST['cost_price'];
-    $selling_price = (float)$_POST['selling_price'];
-    $status = sanitize($_POST['status']);
+    $name = mysqli_real_escape_string($conn, $_POST['name'] ?? '');
+    $sku = mysqli_real_escape_string($conn, $_POST['sku'] ?? '');
+    $cost_price = (float)($_POST['cost_price'] ?? 0);
+    $selling_price = (float)($_POST['selling_price'] ?? 0);
+    $status = mysqli_real_escape_string($conn, $_POST['status'] ?? 'active');
 
     // Validation
     if (empty($name) || empty($sku) || empty($cost_price) || empty($selling_price)) {
@@ -56,21 +79,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $error = "Cost price must be less than the selling price.";
     } else {
         // Check if SKU taken by ANOTHER product
-        $stmt = $pdo->prepare("SELECT id FROM products WHERE sku = ? AND id != ?");
-        $stmt->execute([$sku, $product_id]);
-        if ($stmt->fetch()) {
+        $check_query = "SELECT id FROM products WHERE sku = '$sku' AND id != $product_id";
+        $check_result = mysqli_query($conn, $check_query);
+
+        if ($check_result && mysqli_num_rows($check_result) > 0) {
             $error = "This SKU is already assigned to another product.";
         } else {
-            try {
-                $stmt = $pdo->prepare("UPDATE products SET name = ?, sku = ?, cost_price = ?, selling_price = ?, status = ?, updated_at = NOW() WHERE id = ?");
-                if ($stmt->execute([$name, $sku, $cost_price, $selling_price, $status, $product_id])) {
-                    set_flash_message('success', 'Product updated successfully.');
-                    redirect('admin/products/index.php');
-                } else {
-                    $error = "Failed to update product. Please try again.";
-                }
-            } catch (PDOException $e) {
-                $error = "Database error: " . $e->getMessage();
+            // Update product
+            $update_query = "UPDATE products SET 
+                            name = '$name', 
+                            sku = '$sku', 
+                            cost_price = $cost_price, 
+                            selling_price = $selling_price, 
+                            status = '$status',
+                            updated_at = NOW() 
+                            WHERE id = $product_id";
+
+            if (mysqli_query($conn, $update_query)) {
+                set_flash_message('success', 'Product updated successfully.');
+                redirect('admin/products/index.php');
+            } else {
+                $error = "Failed to update product. Please try again.";
             }
         }
     }
@@ -388,7 +417,7 @@ include '../../includes/navbar.php';
 </div>
 
 <script>
-    document.title = "<?= $page_title ?> - <?= APP_NAME ?>";
+    document.title = "<?= $page_title ?> - Inventory System";
 </script>
 
 <?php include '../../includes/footer.php'; ?>

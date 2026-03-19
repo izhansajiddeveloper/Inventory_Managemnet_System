@@ -1,15 +1,30 @@
 <?php
+
 /**
  * Stock Management - Stock History / Transactions
  */
-require_once __DIR__ . '/../../config/constants.php';
-require_once __DIR__ . '/../../config/db.php';
-require_once __DIR__ . '/../../core/session.php';
-require_once __DIR__ . '/../../core/auth.php';
-require_once __DIR__ . '/../../core/functions.php';
 
-// Access Control
-authorize([ROLE_ADMIN]);
+// Start session if not already started
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
+
+// Include only database config
+require_once __DIR__ . '/../../config/db.php';
+
+// Simple authorization check
+if (!isset($_SESSION['user_id'])) {
+    header("Location: " . BASE_URL . "auth/login.php");
+    exit();
+}
+
+$user_role = $_SESSION['user_role'] ?? 0;
+$allowed_roles = [1]; // Admin only
+
+if (!in_array($user_role, $allowed_roles)) {
+    header("Location: " . BASE_URL . "index.php");
+    exit();
+}
 
 $page_title = "Stock Movement History";
 $page_icon = "fa-clock-rotate-left";
@@ -17,9 +32,9 @@ $page_description = "Detailed audit log of every stock change, including manual 
 
 // Fetching filter parameters
 $product_id_filter = isset($_GET['product_id']) ? (int)$_GET['product_id'] : 0;
-$type_filter = isset($_GET['type']) ? sanitize($_GET['type']) : '';
-$start_date = isset($_GET['start_date']) ? sanitize($_GET['start_date']) : '';
-$end_date = isset($_GET['end_date']) ? sanitize($_GET['end_date']) : '';
+$type_filter = isset($_GET['type']) ? mysqli_real_escape_string($conn, $_GET['type']) : '';
+$start_date = isset($_GET['start_date']) ? mysqli_real_escape_string($conn, $_GET['start_date']) : '';
+$end_date = isset($_GET['end_date']) ? mysqli_real_escape_string($conn, $_GET['end_date']) : '';
 
 // Base query for transactions
 $query = "SELECT t.*, p.name as product_name, p.sku as product_sku, u.name as user_name 
@@ -27,41 +42,39 @@ $query = "SELECT t.*, p.name as product_name, p.sku as product_sku, u.name as us
           LEFT JOIN products p ON t.product_id = p.id 
           LEFT JOIN users u ON t.created_by = u.id 
           WHERE 1=1";
-$params = [];
 
 // Filtering logic
-if ($product_id_filter) {
-    $query .= " AND t.product_id = ?";
-    $params[] = $product_id_filter;
+if ($product_id_filter > 0) {
+    $query .= " AND t.product_id = $product_id_filter";
 }
-if ($type_filter) {
-    $query .= " AND t.type = ?";
-    $params[] = $type_filter;
+if (!empty($type_filter)) {
+    $query .= " AND t.type = '$type_filter'";
 }
-if ($start_date) {
-    $query .= " AND DATE(t.created_at) >= ?";
-    $params[] = $start_date;
+if (!empty($start_date)) {
+    $query .= " AND DATE(t.created_at) >= '$start_date'";
 }
-if ($end_date) {
-    $query .= " AND DATE(t.created_at) <= ?";
-    $params[] = $end_date;
+if (!empty($end_date)) {
+    $query .= " AND DATE(t.created_at) <= '$end_date'";
 }
 
 $query .= " ORDER BY t.created_at DESC";
 
-try {
-    $stmt = $pdo->prepare($query);
-    $stmt->execute($params);
-    $transactions = $stmt->fetchAll();
-} catch (PDOException $e) {
-    $transactions = [];
+$transactions = [];
+$result = mysqli_query($conn, $query);
+if ($result) {
+    while ($row = mysqli_fetch_assoc($result)) {
+        $transactions[] = $row;
+    }
 }
 
 // Fetch products for the dropdown filter
-try {
-    $products = $pdo->query("SELECT id, name FROM products ORDER BY name ASC")->fetchAll();
-} catch (PDOException $e) {
-    $products = [];
+$products = [];
+$products_query = "SELECT id, name FROM products ORDER BY name ASC";
+$products_result = mysqli_query($conn, $products_query);
+if ($products_result) {
+    while ($row = mysqli_fetch_assoc($products_result)) {
+        $products[] = $row;
+    }
 }
 
 include '../../includes/header.php';
@@ -70,21 +83,100 @@ include '../../includes/navbar.php';
 ?>
 
 <style>
-    .transaction-card { background: white; border-radius: 20px; border: 1px solid #f1f5f9; box-shadow: 0 10px 40px -15px rgba(0,0,0,0.08); overflow: hidden; }
-    .table thead th { background: #f8fafc; color: #64748b; font-size: 0.75rem; font-weight: 800; text-transform: uppercase; letter-spacing: 0.05em; padding: 1rem 1.5rem; }
-    .table tbody td { padding: 1.2rem 1.5rem; border-bottom: 1px solid #f8fafc; }
-    .type-badge { padding: 0.35rem 0.85rem; border-radius: 8px; font-size: 0.7rem; font-weight: 800; display: inline-flex; align-items: center; gap: 0.4rem; }
-    .badge-in { background: #ecfdf5; color: #059669; }
-    .badge-out { background: #fef2f2; color: #dc2626; }
-    .ref-badge { background: #f1f5f9; color: #475569; padding: 0.25rem 0.6rem; border-radius: 6px; font-size: 0.7rem; font-weight: 700; text-transform: capitalize; }
-    .date-text { font-size: 0.85rem; font-weight: 600; color: #1e293b; }
-    .time-text { font-size: 0.75rem; color: #94a3b8; }
-    .filter-panel { background: white; border-radius: 16px; border: 1px solid #e2e8f0; padding: 1.25rem; margin-bottom: 1.5rem; }
-    .filter-label { font-size: 0.75rem; font-weight: 700; color: #64748b; margin-bottom: 0.4rem; display: block; }
-    .filter-control { 
-        height: 42px; border-radius: 10px; border: 1.5px solid #e2e8f0; font-size: 0.85rem; padding: 0 1rem; width: 100%; transition: all 0.2s;
+    .transaction-card {
+        background: white;
+        border-radius: 20px;
+        border: 1px solid #f1f5f9;
+        box-shadow: 0 10px 40px -15px rgba(0, 0, 0, 0.08);
+        overflow: hidden;
     }
-    .filter-control:focus { outline: none; border-color: #2563eb; }
+
+    .table thead th {
+        background: #f8fafc;
+        color: #64748b;
+        font-size: 0.75rem;
+        font-weight: 800;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        padding: 1rem 1.5rem;
+    }
+
+    .table tbody td {
+        padding: 1.2rem 1.5rem;
+        border-bottom: 1px solid #f8fafc;
+    }
+
+    .type-badge {
+        padding: 0.35rem 0.85rem;
+        border-radius: 8px;
+        font-size: 0.7rem;
+        font-weight: 800;
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4rem;
+    }
+
+    .badge-in {
+        background: #ecfdf5;
+        color: #059669;
+    }
+
+    .badge-out {
+        background: #fef2f2;
+        color: #dc2626;
+    }
+
+    .ref-badge {
+        background: #f1f5f9;
+        color: #475569;
+        padding: 0.25rem 0.6rem;
+        border-radius: 6px;
+        font-size: 0.7rem;
+        font-weight: 700;
+        text-transform: capitalize;
+    }
+
+    .date-text {
+        font-size: 0.85rem;
+        font-weight: 600;
+        color: #1e293b;
+    }
+
+    .time-text {
+        font-size: 0.75rem;
+        color: #94a3b8;
+    }
+
+    .filter-panel {
+        background: white;
+        border-radius: 16px;
+        border: 1px solid #e2e8f0;
+        padding: 1.25rem;
+        margin-bottom: 1.5rem;
+    }
+
+    .filter-label {
+        font-size: 0.75rem;
+        font-weight: 700;
+        color: #64748b;
+        margin-bottom: 0.4rem;
+        display: block;
+    }
+
+    .filter-control {
+        height: 42px;
+        border-radius: 10px;
+        border: 1.5px solid #e2e8f0;
+        font-size: 0.85rem;
+        padding: 0 1rem;
+        width: 100%;
+        transition: all 0.2s;
+    }
+
+    .filter-control:focus {
+        outline: none;
+        border-color: #2563eb;
+    }
 </style>
 
 <div class="px-4 py-4">
@@ -233,7 +325,7 @@ include '../../includes/navbar.php';
 </div>
 
 <script>
-    document.title = "<?= $page_title ?> - <?= APP_NAME ?>";
+    document.title = "<?= $page_title ?> - Inventory System";
 </script>
 
 <?php include '../../includes/footer.php'; ?>

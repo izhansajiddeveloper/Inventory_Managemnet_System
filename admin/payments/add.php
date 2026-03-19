@@ -2,14 +2,28 @@
 /**
  * Add New Payment
  */
-require_once __DIR__ . '/../../config/constants.php';
-require_once __DIR__ . '/../../config/db.php';
-require_once __DIR__ . '/../../core/session.php';
-require_once __DIR__ . '/../../core/auth.php';
-require_once __DIR__ . '/../../core/functions.php';
 
-// Access Control
-authorize([ROLE_ADMIN, ROLE_STAFF]);
+// Start session if not already started
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
+
+// Include only database config
+require_once __DIR__ . '/../../config/db.php';
+
+// Simple authorization check
+if (!isset($_SESSION['user_id'])) {
+    header("Location: " . BASE_URL . "auth/login.php");
+    exit();
+}
+
+$user_role = $_SESSION['user_role'] ?? 0;
+$allowed_roles = [1, 3]; // Admin and Staff
+
+if (!in_array($user_role, $allowed_roles)) {
+    header("Location: " . BASE_URL . "index.php");
+    exit();
+}
 
 $page_title = "Record New Payment";
 $page_icon = "fa-hand-holding-dollar";
@@ -17,59 +31,72 @@ $page_description = "Add payment for pending or partially paid orders";
 
 $order_id_param = isset($_GET['order_id']) ? 'ORD-' . (int)$_GET['order_id'] : (isset($_GET['sale_id']) ? 'SALE-' . (int)$_GET['sale_id'] : '');
 
+// Helper function for price formatting
+function format_price($amount) {
+    return 'Rs. ' . number_format($amount, 2);
+}
+
+// Helper function for flash messages
+function set_flash_message($type, $message) {
+    $_SESSION['flash'] = ['type' => $type, 'message' => $message];
+}
+
 // Fetch Pending/Partial orders
-try {
-    $transactions_query = "
-        SELECT CONCAT('ORD-', o.id) as unique_id, o.id as raw_id, 'Order' as type, o.final_amount, c.name as customer_name,
-               COALESCE((SELECT SUM(amount) FROM payments WHERE order_id = o.id), 0) as total_paid
-        FROM orders o
-        LEFT JOIN users c ON o.customer_id = c.id
-        WHERE o.status != 'cancelled'
-        HAVING total_paid < o.final_amount
-        ORDER BY o.id DESC";
-    
-    $transactions = $pdo->query($transactions_query)->fetchAll();
-} catch (PDOException $e) {
-    die("Error fetching orders: " . $e->getMessage());
+$transactions = [];
+
+$transactions_query = "
+    SELECT CONCAT('ORD-', o.id) as unique_id, o.id as raw_id, 'Order' as type, o.final_amount, c.name as customer_name,
+           COALESCE((SELECT SUM(amount) FROM payments WHERE order_id = o.id), 0) as total_paid
+    FROM orders o
+    LEFT JOIN users c ON o.customer_id = c.id
+    WHERE o.status != 'cancelled'
+    HAVING total_paid < o.final_amount
+    ORDER BY o.id DESC";
+
+$result = mysqli_query($conn, $transactions_query);
+if ($result) {
+    while ($row = mysqli_fetch_assoc($result)) {
+        $transactions[] = $row;
+    }
 }
 
 // Handle Submission
+$errors = [];
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $target_uid     = sanitize($_POST['target_id']); // e.g. ORD-1
-    $payment_method = sanitize($_POST['payment_method']);
-    $amount         = (float)$_POST['amount'];
-    $note           = sanitize($_POST['note'] ?? '');
+    $target_uid     = mysqli_real_escape_string($conn, $_POST['target_id'] ?? ''); // e.g. ORD-1
+    $payment_method = mysqli_real_escape_string($conn, $_POST['payment_method'] ?? '');
+    $amount         = (float)($_POST['amount'] ?? 0);
+    $note           = mysqli_real_escape_string($conn, $_POST['note'] ?? '');
 
     $parts  = explode('-', $target_uid);
-    $id     = (int)$parts[1];
+    $id     = (int)($parts[1] ?? 0);
 
     $order_id = $id;
     $sale_id  = null;
 
-    $errors = [];
-
     // Fetch full details to validate remaining amount
-    $stmt = $pdo->prepare("
+    $row_query = "
         SELECT o.final_amount,
                COALESCE((SELECT SUM(amount) FROM payments WHERE order_id = o.id), 0) AS total_paid,
                (SELECT id FROM sales WHERE order_id = o.id LIMIT 1) AS linked_sale_id
-        FROM orders o WHERE o.id = ?");
+        FROM orders o WHERE o.id = $id";
     
-    $stmt->execute([$id]);
-    $row = $stmt->fetch();
-
-    if (!$row) {
+    $row_result = mysqli_query($conn, $row_query);
+    
+    if (!$row_result || mysqli_num_rows($row_result) == 0) {
         $errors[] = "Invalid selection.";
     } else {
+        $row = mysqli_fetch_assoc($row_result);
         $remaining = $row['final_amount'] - $row['total_paid'];
         if ($amount <= 0)              $errors[] = "Amount must be greater than 0.";
         if ($amount > $remaining + 0.01) $errors[] = "Amount exceeds the remaining balance of " . format_price($remaining);
     }
 
     if (empty($errors)) {
+        // Start transaction
+        mysqli_begin_transaction($conn);
+        
         try {
-            $pdo->beginTransaction();
-
             // Handle Payment Proof Upload
             $proof_path = null;
             if (isset($_FILES['payment_proof']) && $_FILES['payment_proof']['error'] === UPLOAD_ERR_OK) {
@@ -82,7 +109,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
             }
 
-            $transaction_id = !empty($_POST['transaction_id']) ? sanitize($_POST['transaction_id']) : null;
+            $transaction_id = !empty($_POST['transaction_id']) ? mysqli_real_escape_string($conn, $_POST['transaction_id']) : null;
 
             // Determine statuses
             $new_total_paid = $row['total_paid'] + $amount;
@@ -93,64 +120,83 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $linked_sale_id = !empty($row['linked_sale_id']) ? (int)$row['linked_sale_id'] : null;
 
             // Insert Payment
-            $pdo->prepare("
-                INSERT INTO payments (order_id, sale_id, payment_method, transaction_id, payment_proof, amount, status)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            ")->execute([$order_id, $linked_sale_id, $payment_method, $transaction_id, $proof_path, $amount, $payment_status]);
-            $payment_id = $pdo->lastInsertId();
+            $order_id_val = $order_id ? $order_id : 'NULL';
+            $sale_id_val = $linked_sale_id ? $linked_sale_id : 'NULL';
+            $proof_path_val = $proof_path ? "'$proof_path'" : 'NULL';
+            $transaction_id_val = $transaction_id ? "'$transaction_id'" : 'NULL';
+            
+            $payment_sql = "INSERT INTO payments (order_id, sale_id, payment_method, transaction_id, payment_proof, amount, status)
+                           VALUES ($order_id_val, $sale_id_val, '$payment_method', $transaction_id_val, $proof_path_val, $amount, '$payment_status')";
+            
+            mysqli_query($conn, $payment_sql);
+            $payment_id = mysqli_insert_id($conn);
 
             if ($is_fully_paid) {
-                // Trigger Profit Calculation
-                require_once __DIR__ . '/../profit/calculate.php';
-                calculate_order_profit($pdo, $order_id);
+                // Include profit calculation if needed
+                // require_once __DIR__ . '/../profit/calculate.php';
+                // calculate_order_profit($conn, $order_id);
 
                 // 1. Update order status
-                $pdo->prepare("UPDATE orders SET status = 'completed' WHERE id = ?")->execute([$order_id]);
+                mysqli_query($conn, "UPDATE orders SET status = 'completed' WHERE id = $order_id");
 
                 // 2. If no sale exists yet, CREATE it
                 if (!$linked_sale_id) {
-                    $o_stmt = $pdo->prepare("SELECT * FROM orders WHERE id = ?");
-                    $o_stmt->execute([$order_id]);
-                    $order = $o_stmt->fetch();
+                    $o_result = mysqli_query($conn, "SELECT * FROM orders WHERE id = $order_id");
+                    $order = mysqli_fetch_assoc($o_result);
                     if ($order) {
-                        $pdo->prepare("
-                            INSERT INTO sales (order_id, customer_id, created_by, total_amount, discount, final_amount, status)
-                            VALUES (?, ?, ?, ?, ?, ?, 'completed')
-                        ")->execute([$order_id, $order['customer_id'], $order['created_by'], $order['total_amount'], $order['discount'], $order['final_amount']]);
-                        $linked_sale_id = $pdo->lastInsertId();
+                        $customer_id_val = $order['customer_id'] ? $order['customer_id'] : 'NULL';
+                        $sale_insert_sql = "INSERT INTO sales (order_id, customer_id, created_by, total_amount, discount, final_amount, status)
+                                          VALUES ($order_id, $customer_id_val, {$order['created_by']}, {$order['total_amount']}, {$order['discount']}, {$order['final_amount']}, 'completed')";
+                        mysqli_query($conn, $sale_insert_sql);
+                        $linked_sale_id = mysqli_insert_id($conn);
 
                         // Copy items
-                        $si_stmt = $pdo->prepare("SELECT product_id, quantity, price FROM order_items WHERE order_id = ?");
-                        $si_stmt->execute([$order_id]);
-                        $o_items = $si_stmt->fetchAll();
-                        foreach ($o_items as $oi) {
-                            $pdo->prepare("INSERT INTO sale_items (sale_id, product_id, quantity, price) VALUES (?, ?, ?, ?)")
-                                ->execute([$linked_sale_id, $oi['product_id'], $oi['quantity'], $oi['price']]);
+                        $items_result = mysqli_query($conn, "SELECT product_id, quantity, price FROM order_items WHERE order_id = $order_id");
+                        while ($oi = mysqli_fetch_assoc($items_result)) {
+                            mysqli_query($conn, "INSERT INTO sale_items (sale_id, product_id, quantity, price) 
+                                               VALUES ($linked_sale_id, {$oi['product_id']}, {$oi['quantity']}, {$oi['price']})");
                         }
                         
                         // Link THIS payment to the new sale
-                        $pdo->prepare("UPDATE payments SET sale_id = ? WHERE id = ?")->execute([$linked_sale_id, $payment_id]);
+                        mysqli_query($conn, "UPDATE payments SET sale_id = $linked_sale_id WHERE id = $payment_id");
                     }
                 }
 
                 // 3. Mark sale as completed
                 if ($linked_sale_id) {
-                    $pdo->prepare("UPDATE sales SET status = 'completed' WHERE id = ?")->execute([$linked_sale_id]);
+                    mysqli_query($conn, "UPDATE sales SET status = 'completed' WHERE id = $linked_sale_id");
                 }
             }
-            $pdo->commit();
+            
+            // Commit transaction
+            mysqli_commit($conn);
 
             set_flash_message('success', "Payment of " . format_price($amount) . " recorded. Status: " . ucfirst($payment_status) . ".");
             if ($linked_sale_id) {
-                redirect('admin/sales/view.php?id=' . $linked_sale_id);
+                header("Location: " . BASE_URL . "admin/sales/view.php?id=" . $linked_sale_id);
             } else {
-                redirect('admin/payments/index.php');
+                header("Location: " . BASE_URL . "admin/payments/index.php");
             }
+            exit();
 
-        } catch (PDOException $e) {
-            $pdo->rollBack();
+        } catch (Exception $e) {
+            mysqli_rollback($conn);
             $errors[] = "Transaction failed: " . $e->getMessage();
         }
+    }
+}
+
+// Helper function for flash message display
+function display_flash_message() {
+    if (isset($_SESSION['flash'])) {
+        $flash = $_SESSION['flash'];
+        $alertClass = $flash['type'] == 'success' ? 'alert-success' : 'alert-danger';
+        echo '<div class="alert ' . $alertClass . ' alert-dismissible fade show rounded-4 shadow-sm mb-4" role="alert">';
+        echo '<i class="fa-solid ' . ($flash['type'] == 'success' ? 'fa-circle-check' : 'fa-circle-exclamation') . ' me-2"></i>';
+        echo $flash['message'];
+        echo '<button type="button" class="btn-close" data-bs-dismiss="alert"></button>';
+        echo '</div>';
+        unset($_SESSION['flash']);
     }
 }
 
@@ -176,7 +222,7 @@ include '../../includes/navbar.php';
     <?php if (!empty($errors)): ?>
         <div class="alert alert-danger rounded-4 shadow-sm mb-4">
             <ul class="mb-0">
-                <?php foreach ($errors as $error) echo "<li>$error</li>"; ?>
+                <?php foreach ($errors as $error) echo "<li>" . htmlspecialchars($error) . "</li>"; ?>
             </ul>
         </div>
     <?php endif; ?>

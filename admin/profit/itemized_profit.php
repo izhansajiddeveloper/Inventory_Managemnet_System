@@ -1,15 +1,43 @@
 <?php
+
 /**
  * Itemized Profit Report
  * Displays profit for every product sold within each order
  */
-require_once __DIR__ . '/../../config/constants.php';
-require_once __DIR__ . '/../../config/db.php';
-require_once __DIR__ . '/../../core/session.php';
-require_once __DIR__ . '/../../core/auth.php';
-require_once __DIR__ . '/../../core/functions.php';
 
-authorize([ROLE_ADMIN]);
+// Start session if not already started
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
+
+// Include only database config
+require_once __DIR__ . '/../../config/db.php';
+
+// Simple authorization check
+if (!isset($_SESSION['user_id'])) {
+    header("Location: " . BASE_URL . "auth/login.php");
+    exit();
+}
+
+$user_role = $_SESSION['user_role'] ?? 0;
+$allowed_roles = [1]; // Admin only
+
+if (!in_array($user_role, $allowed_roles)) {
+    header("Location: " . BASE_URL . "index.php");
+    exit();
+}
+
+// Helper functions
+function format_price($amount)
+{
+    return 'Rs. ' . number_format($amount, 2);
+}
+
+function sanitize($data)
+{
+    global $conn;
+    return mysqli_real_escape_string($conn, htmlspecialchars(trim($data)));
+}
 
 $page_title = "Itemized Order Profit";
 $page_icon = "fa-list-check";
@@ -36,63 +64,56 @@ $query = "
     FROM order_items oi
     JOIN orders o ON oi.order_id = o.id
     JOIN products p ON oi.product_id = p.id
-    LEFT JOIN customers c ON o.customer_id = c.id
+    LEFT JOIN users c ON o.customer_id = c.id
     WHERE o.status = 'completed'";
 
-$params = [];
-
-if ($search) {
-    $query .= " AND (o.id LIKE ? OR p.name LIKE ? OR c.name LIKE ?)";
-    $params[] = "%$search%";
-    $params[] = "%$search%";
-    $params[] = "%$search%";
+if (!empty($search)) {
+    $query .= " AND (o.id LIKE '%$search%' OR p.name LIKE '%$search%' OR c.name LIKE '%$search%')";
 }
 
-if ($date_from) {
-    $query .= " AND DATE(o.created_at) >= ?";
-    $params[] = $date_from;
+if (!empty($date_from)) {
+    $query .= " AND DATE(o.created_at) >= '$date_from'";
 }
 
-if ($date_to) {
-    $query .= " AND DATE(o.created_at) <= ?";
-    $params[] = $date_to;
+if (!empty($date_to)) {
+    $query .= " AND DATE(o.created_at) <= '$date_to'";
 }
 
 $query .= " ORDER BY o.created_at DESC";
 
-try {
-    $stmt = $pdo->prepare($query);
-    $stmt->execute($params);
-    $items = $stmt->fetchAll();
-
-    // Stats: Aggregated from the filtered view
-    $stats_query = "
-        SELECT 
-           SUM(p.cost_price * oi.quantity) as total_cost,
-           SUM(oi.total) as total_revenue,
-           SUM(oi.total - (p.cost_price * oi.quantity)) as total_gross_profit,
-           (SELECT SUM(discount) FROM orders WHERE status = 'completed'";
-    
-    if ($date_from) $stats_query .= " AND DATE(created_at) >= '$date_from'";
-    if ($date_to)   $stats_query .= " AND DATE(created_at) <= '$date_to'";
-    
-    $stats_query .= ") as total_discounts
-        FROM order_items oi
-        JOIN orders o ON oi.order_id = o.id
-        JOIN products p ON oi.product_id = p.id
-        WHERE o.status = 'completed'";
-
-    if ($date_from) $stats_query .= " AND DATE(o.created_at) >= '$date_from'";
-    if ($date_to)   $stats_query .= " AND DATE(o.created_at) <= '$date_to'";
-
-    $stats = $pdo->query($stats_query)->fetch();
-    
-    // Net profit after order-wide discounts
-    $net_profit = ($stats['total_gross_profit'] ?? 0) - ($stats['total_discounts'] ?? 0);
-
-} catch (PDOException $e) {
-    die("DB Error: " . $e->getMessage());
+$items = [];
+$result = mysqli_query($conn, $query);
+if ($result) {
+    while ($row = mysqli_fetch_assoc($result)) {
+        $items[] = $row;
+    }
 }
+
+// Stats: Aggregated from the filtered view
+$stats_query = "
+    SELECT 
+       SUM(p.cost_price * oi.quantity) as total_cost,
+       SUM(oi.total) as total_revenue,
+       SUM(oi.total - (p.cost_price * oi.quantity)) as total_gross_profit,
+       (SELECT SUM(discount) FROM orders WHERE status = 'completed'";
+
+if (!empty($date_from)) $stats_query .= " AND DATE(created_at) >= '$date_from'";
+if (!empty($date_to))   $stats_query .= " AND DATE(created_at) <= '$date_to'";
+
+$stats_query .= ") as total_discounts
+    FROM order_items oi
+    JOIN orders o ON oi.order_id = o.id
+    JOIN products p ON oi.product_id = p.id
+    WHERE o.status = 'completed'";
+
+if (!empty($date_from)) $stats_query .= " AND DATE(o.created_at) >= '$date_from'";
+if (!empty($date_to))   $stats_query .= " AND DATE(o.created_at) <= '$date_to'";
+
+$stats_result = mysqli_query($conn, $stats_query);
+$stats = $stats_result ? mysqli_fetch_assoc($stats_result) : ['total_cost' => 0, 'total_revenue' => 0, 'total_gross_profit' => 0, 'total_discounts' => 0];
+
+// Net profit after order-wide discounts
+$net_profit = ($stats['total_gross_profit'] ?? 0) - ($stats['total_discounts'] ?? 0);
 
 include '../../includes/header.php';
 include '../../includes/sidebar.php';
@@ -102,9 +123,14 @@ include '../../includes/navbar.php';
 <div class="px-3 py-4">
     <!-- Header -->
     <div class="d-flex align-items-center justify-content-between mb-4">
-        <div>
-            <h1 class="h4 fw-bold text-slate-900 mb-0"><?= $page_title ?></h1>
-            <p class="text-slate-500 small mb-0"><?= $page_description ?></p>
+        <div class="d-flex align-items-center gap-3">
+            <div class="p-3 bg-blue-50 text-blue-600 rounded-4 border border-blue-100">
+                <i class="fa-solid <?= $page_icon ?> fa-xl"></i>
+            </div>
+            <div>
+                <h1 class="h4 fw-bold text-slate-900 mb-0"><?= $page_title ?></h1>
+                <p class="text-slate-500 small mb-0"><?= $page_description ?></p>
+            </div>
         </div>
         <div>
             <button class="btn btn-dark rounded-3 px-3 py-2 fw-bold" onclick="window.print()">
@@ -124,7 +150,7 @@ include '../../includes/navbar.php';
         <div class="col-md-3">
             <div class="p-4 bg-white rounded-4 border-start border-5 border-blue-400 shadow-sm">
                 <div class="small fw-bold text-slate-400 uppercase mb-1">Total Sales Value</div>
-                <div class="h5 fw-bold text-blue-600 mb-0"><?= format_price(($stats['total_revenue'] ?? 0) - ($stats['total_discounts'] ?? 0)) ?></div>
+                <div class="h5 fw-bold text-blue-600 mb-0"><?= format_price(($stats['total_revenue'] ?? 0)) ?></div>
             </div>
         </div>
         <div class="col-md-3">
@@ -183,29 +209,29 @@ include '../../includes/navbar.php';
                 </thead>
                 <tbody>
                     <?php if (!empty($items)): ?>
-                        <?php 
+                        <?php
                         $current_order_id = null;
-                        foreach ($items as $item): 
+                        foreach ($items as $item):
                             $is_new_order = ($item['order_id'] !== $current_order_id);
                             $current_order_id = $item['order_id'];
-                            
+
                             if ($is_new_order):
                         ?>
-                            <tr class="bg-slate-50 border-top border-slate-200">
-                                <td colspan="7" class="ps-4 py-2">
-                                    <div class="d-flex align-items-center justify-content-between">
-                                        <div class="fw-black text-slate-900 uppercase" style="letter-spacing: 0.5px;">
-                                            <i class="fa-solid fa-receipt me-2 opacity-50"></i>Order #ORD-<?= str_pad($item['order_id'], 5, '0', STR_PAD_LEFT) ?>
-                                            <span class="mx-2 text-slate-300">|</span>
-                                            <span class="small fw-bold text-slate-500"><?= htmlspecialchars($item['customer_name'] ?? 'Walk-in') ?></span>
+                                <tr class="bg-slate-50 border-top border-slate-200">
+                                    <td colspan="7" class="ps-4 py-2">
+                                        <div class="d-flex align-items-center justify-content-between">
+                                            <div class="fw-black text-slate-900 uppercase" style="letter-spacing: 0.5px;">
+                                                <i class="fa-solid fa-receipt me-2 opacity-50"></i>Order #ORD-<?= str_pad($item['order_id'], 5, '0', STR_PAD_LEFT) ?>
+                                                <span class="mx-2 text-slate-300">|</span>
+                                                <span class="small fw-bold text-slate-500"><?= htmlspecialchars($item['customer_name'] ?? 'Walk-in') ?></span>
+                                            </div>
+                                            <div class="small text-slate-400 fw-bold me-3">
+                                                <?= date('d M Y, h:i A', strtotime($item['order_date'])) ?>
+                                            </div>
                                         </div>
-                                        <div class="small text-slate-400 fw-bold me-3">
-                                            <?= date('d M Y, h:i A', strtotime($item['order_date'])) ?>
-                                        </div>
-                                    </div>
-                                </td>
-                            </tr>
-                        <?php endif; ?>
+                                    </td>
+                                </tr>
+                            <?php endif; ?>
                             <tr>
                                 <td class="ps-4"></td>
                                 <td>
@@ -231,17 +257,19 @@ include '../../includes/navbar.php';
                                 </td>
                             </tr>
                         <?php endforeach; ?>
-                        
-                        <?php if ($stats['total_discounts'] > 0): ?>
-                        <tr class="bg-rose-50 border-top-2 border-rose-100">
-                            <td colspan="5" class="ps-4 py-3 text-rose-800 fw-bold italic">Adjusting for Order-Wide Discounts</td>
-                            <td class="text-end pe-4 text-rose-700 fw-bold">- <?= format_price($stats['total_discounts']) ?></td>
-                            <td></td>
-                        </tr>
+
+                        <?php if (($stats['total_discounts'] ?? 0) > 0): ?>
+                            <tr class="bg-rose-50 border-top-2 border-rose-100">
+                                <td colspan="5" class="ps-4 py-3 text-rose-800 fw-bold italic">Adjusting for Order-Wide Discounts</td>
+                                <td class="text-end pe-4 text-rose-700 fw-bold">- <?= format_price($stats['total_discounts']) ?></td>
+                                <td></td>
+                            </tr>
                         <?php endif; ?>
 
                     <?php else: ?>
-                        <tr><td colspan="7" class="text-center py-5">No itemized profit data found for the selected filters.</td></tr>
+                        <tr>
+                            <td colspan="7" class="text-center py-5">No itemized profit data found for the selected filters.</td>
+                        </tr>
                     <?php endif; ?>
                 </tbody>
             </table>

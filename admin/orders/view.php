@@ -1,122 +1,168 @@
 <?php
+
 /**
  * View Order Details
  */
-require_once __DIR__ . '/../../config/constants.php';
-require_once __DIR__ . '/../../config/db.php';
-require_once __DIR__ . '/../../core/session.php';
-require_once __DIR__ . '/../../core/auth.php';
-require_once __DIR__ . '/../../core/functions.php';
 
-// Access Control
-authorize([ROLE_ADMIN]);
+// Start session if not already started
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
+
+// Include only database config
+require_once __DIR__ . '/../../config/db.php';
+
+// Simple authorization check
+if (!isset($_SESSION['user_id'])) {
+    header("Location: " . BASE_URL . "auth/login.php");
+    exit();
+}
+
+$user_role = $_SESSION['user_role'] ?? 0;
+$allowed_roles = [1]; // Admin only
+
+if (!in_array($user_role, $allowed_roles)) {
+    header("Location: " . BASE_URL . "index.php");
+    exit();
+}
 
 $order_id = isset($_GET['id']) ? (int)$_GET['id'] : 0;
 
 if (!$order_id) {
-    set_flash_message('error', "Invalid order requested.");
-    redirect('admin/orders/index.php');
+    $_SESSION['flash'] = ['type' => 'error', 'message' => "Invalid order requested."];
+    header("Location: " . BASE_URL . "admin/orders/index.php");
+    exit();
 }
 
 // Handle Status Changes
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_status'])) {
-    $new_status = sanitize($_POST['status']);
-    $current_status_stmt = $pdo->prepare("SELECT status FROM orders WHERE id = ?");
-    $current_status_stmt->execute([$order_id]);
-    $current_status = $current_status_stmt->fetchColumn();
+    $new_status = mysqli_real_escape_string($conn, $_POST['status']);
+
+    // Get current status
+    $result = mysqli_query($conn, "SELECT status FROM orders WHERE id = $order_id");
+    $current_status = $result ? mysqli_fetch_assoc($result)['status'] : '';
 
     if ($current_status !== $new_status) {
-        try {
-            $pdo->beginTransaction();
+        // Start transaction
+        mysqli_begin_transaction($conn);
 
+        try {
             // 1. Update Order Status
-            $stmt = $pdo->prepare("UPDATE orders SET status = ? WHERE id = ?");
-            $stmt->execute([$new_status, $order_id]);
+            $update_sql = "UPDATE orders SET status = '$new_status' WHERE id = $order_id";
+            mysqli_query($conn, $update_sql);
 
             // 2. Cancellation Logic (RESTORE STOCK & Sync Sale)
             if ($new_status === 'cancelled') {
-                // Restore stock
-                $items_stmt = $pdo->prepare("SELECT product_id, quantity FROM order_items WHERE order_id = ?");
-                $items_stmt->execute([$order_id]);
-                $items = $items_stmt->fetchAll();
+                // Get order items
+                $items_result = mysqli_query($conn, "SELECT product_id, quantity FROM order_items WHERE order_id = $order_id");
 
-                foreach ($items as $item) {
-                    $pdo->prepare("UPDATE product_stock SET quantity = quantity + ? WHERE product_id = ?")
-                        ->execute([$item['quantity'], $item['product_id']]);
-                    $pdo->prepare("INSERT INTO product_transactions (product_id, quantity, type, reference_type, reference_id, created_by, note) 
-                                   VALUES (?, ?, 'IN', 'order', ?, ?, ?)")
-                        ->execute([$item['product_id'], $item['quantity'], $order_id, $_SESSION[SESSION_USER_ID], "Stock Restored - Cancelled Order #$order_id"]);
+                while ($item = mysqli_fetch_assoc($items_result)) {
+                    // Restore stock
+                    mysqli_query($conn, "UPDATE product_stock SET quantity = quantity + {$item['quantity']} WHERE product_id = {$item['product_id']}");
+
+                    // Log transaction
+                    $note = "Stock Restored - Cancelled Order #$order_id";
+                    mysqli_query($conn, "INSERT INTO product_transactions (product_id, quantity, type, reference_type, reference_id, created_by, note) 
+                                       VALUES ({$item['product_id']}, {$item['quantity']}, 'IN', 'order', $order_id, {$_SESSION['user_id']}, '$note')");
                 }
 
                 // Sync Sale Cancellation
-                $pdo->prepare("UPDATE sales SET status = 'cancelled' WHERE order_id = ?")->execute([$order_id]);
+                mysqli_query($conn, "UPDATE sales SET status = 'cancelled' WHERE order_id = $order_id");
             }
 
             // 3. Status Completion Logic (Ensure Sale Record Exists)
             if ($new_status === 'completed') {
                 // Check if sale exists
-                $s_check = $pdo->prepare("SELECT id FROM sales WHERE order_id = ?");
-                $s_check->execute([$order_id]);
-                $sale_exists = $s_check->fetchColumn();
+                $s_check = mysqli_query($conn, "SELECT id FROM sales WHERE order_id = $order_id");
+                $sale_exists = mysqli_fetch_assoc($s_check);
 
                 if (!$sale_exists) {
-                    // Create Sale from scratch
-                    $o_data = $pdo->prepare("SELECT * FROM orders WHERE id = ?");
-                    $o_data->execute([$order_id]);
-                    $ord = $o_data->fetch();
+                    // Get order data
+                    $o_result = mysqli_query($conn, "SELECT * FROM orders WHERE id = $order_id");
+                    $ord = mysqli_fetch_assoc($o_result);
 
-                    $pdo->prepare("INSERT INTO sales (order_id, customer_id, created_by, total_amount, discount, final_amount, status) VALUES (?, ?, ?, ?, ?, ?, 'completed')")
-                        ->execute([$order_id, $ord['customer_id'], $ord['created_by'], $ord['total_amount'], $ord['discount'], $ord['final_amount']]);
-                    $new_sale_id = $pdo->lastInsertId();
+                    // Create Sale
+                    $customer_id = $ord['customer_id'] ? $ord['customer_id'] : 'NULL';
+                    $sale_sql = "INSERT INTO sales (order_id, customer_id, created_by, total_amount, discount, final_amount, status) 
+                                VALUES ($order_id, $customer_id, {$ord['created_by']}, {$ord['total_amount']}, {$ord['discount']}, {$ord['final_amount']}, 'completed')";
+                    mysqli_query($conn, $sale_sql);
+                    $new_sale_id = mysqli_insert_id($conn);
 
                     // Copy items
-                    $oi_stmt = $pdo->prepare("SELECT * FROM order_items WHERE order_id = ?");
-                    $oi_stmt->execute([$order_id]);
-                    $o_items = $oi_stmt->fetchAll();
-                    foreach ($o_items as $oi) {
-                        $pdo->prepare("INSERT INTO sale_items (sale_id, product_id, quantity, price) VALUES (?, ?, ?, ?)")
-                            ->execute([$new_sale_id, $oi['product_id'], $oi['quantity'], $oi['price']]);
+                    $oi_result = mysqli_query($conn, "SELECT * FROM order_items WHERE order_id = $order_id");
+                    while ($oi = mysqli_fetch_assoc($oi_result)) {
+                        mysqli_query($conn, "INSERT INTO sale_items (sale_id, product_id, quantity, price) 
+                                           VALUES ($new_sale_id, {$oi['product_id']}, {$oi['quantity']}, {$oi['price']})");
                     }
                 } else {
                     // Update existing sale status
-                    $pdo->prepare("UPDATE sales SET status = 'completed' WHERE order_id = ?")->execute([$order_id]);
+                    mysqli_query($conn, "UPDATE sales SET status = 'completed' WHERE order_id = $order_id");
                 }
             }
 
-            $pdo->commit();
-            set_flash_message('success', "Order and linked sale updated to " . ucfirst($new_status));
-            
-        } catch (PDOException $e) {
-            $pdo->rollBack();
-            set_flash_message('error', "Failed to update status: " . $e->getMessage());
+            // Commit transaction
+            mysqli_commit($conn);
+            $_SESSION['flash'] = ['type' => 'success', 'message' => "Order and linked sale updated to " . ucfirst($new_status)];
+        } catch (Exception $e) {
+            mysqli_rollback($conn);
+            $_SESSION['flash'] = ['type' => 'error', 'message' => "Failed to update status: " . $e->getMessage()];
         }
     }
 }
 
 // Fetch Order Details
-try {
-    $order_stmt = $pdo->prepare("SELECT o.*, c.name as customer_name, c.email as customer_email, c.phone as customer_phone, c.address as customer_address, u.name as staff_name 
-                                FROM orders o 
-                                LEFT JOIN users c ON o.customer_id = c.id 
-                                LEFT JOIN users u ON o.created_by = u.id 
-                                WHERE o.id = ?");
-    $order_stmt->execute([$order_id]);
-    $order = $order_stmt->fetch();
+$order = null;
+$items = [];
 
-    if (!$order) {
-        set_flash_message('error', "Order details not found for ID $order_id.");
-        redirect('admin/orders/index.php');
+// Order query
+$order_sql = "SELECT o.*, c.name as customer_name, c.email as customer_email, c.phone as customer_phone, 
+                      u.name as staff_name 
+              FROM orders o 
+              LEFT JOIN users c ON o.customer_id = c.id 
+              LEFT JOIN users u ON o.created_by = u.id 
+              WHERE o.id = $order_id";
+
+$order_result = mysqli_query($conn, $order_sql);
+if ($order_result && mysqli_num_rows($order_result) > 0) {
+    $order = mysqli_fetch_assoc($order_result);
+} else {
+    $_SESSION['flash'] = ['type' => 'error', 'message' => "Order details not found for ID $order_id."];
+    header("Location: " . BASE_URL . "admin/orders/index.php");
+    exit();
+}
+
+// Items query
+$items_sql = "SELECT oi.*, p.name as product_name, p.sku as product_sku 
+              FROM order_items oi 
+              JOIN products p ON oi.product_id = p.id 
+              WHERE oi.order_id = $order_id";
+
+$items_result = mysqli_query($conn, $items_sql);
+if ($items_result) {
+    while ($row = mysqli_fetch_assoc($items_result)) {
+        $items[] = $row;
     }
+}
 
-    $items_stmt = $pdo->prepare("SELECT oi.*, p.name as product_name, p.sku as product_sku 
-                                FROM order_items oi 
-                                JOIN products p ON oi.product_id = p.id 
-                                WHERE oi.order_id = ?");
-    $items_stmt->execute([$order_id]);
-    $items = $items_stmt->fetchAll();
+// Helper function for price formatting
+function format_price($amount)
+{
+    return 'Rs. ' . number_format($amount, 2);
+}
 
-} catch (PDOException $e) {
-    die("Error fetching order details: " . $e->getMessage());
+// Helper function for flash messages
+function display_flash_message()
+{
+    if (isset($_SESSION['flash'])) {
+        $flash = $_SESSION['flash'];
+        $alertClass = $flash['type'] == 'success' ? 'alert-success' : 'alert-danger';
+        echo '<div class="alert ' . $alertClass . ' alert-dismissible fade show rounded-4 shadow-sm mb-4" role="alert">';
+        echo '<i class="fa-solid ' . ($flash['type'] == 'success' ? 'fa-circle-check' : 'fa-circle-exclamation') . ' me-2"></i>';
+        echo $flash['message'];
+        echo '<button type="button" class="btn-close" data-bs-dismiss="alert"></button>';
+        echo '</div>';
+        unset($_SESSION['flash']);
+    }
 }
 
 $page_title = "Order Details #ORD-" . str_pad($order['id'], 5, '0', STR_PAD_LEFT);
@@ -135,7 +181,7 @@ include '../../includes/navbar.php';
             </div>
             <div>
                 <h1 class="h4 fw-bold text-slate-900 mb-0"><?= $page_title ?></h1>
-                <p class="text-slate-500 small mb-0">Managing order from <?= htmlspecialchars($order['customer_name']) ?></p>
+                <p class="text-slate-500 small mb-0">Managing order from <?= htmlspecialchars($order['customer_name'] ?? 'Walk-in Customer') ?></p>
             </div>
         </div>
         <div class="d-flex gap-2">
@@ -214,23 +260,23 @@ include '../../includes/navbar.php';
                         <i class="fa-solid fa-user"></i>
                     </div>
                     <div>
-                        <div class="fw-bold text-slate-900"><?= htmlspecialchars($order['customer_name']) ?></div>
-                        <div class="small text-slate-500"><?= htmlspecialchars($order['customer_phone']) ?></div>
+                        <div class="fw-bold text-slate-900"><?= htmlspecialchars($order['customer_name'] ?? 'Walk-in Customer') ?></div>
+                        <div class="small text-slate-500"><?= htmlspecialchars($order['customer_phone'] ?? 'N/A') ?></div>
                     </div>
                 </div>
                 <div class="pt-3 border-top">
                     <div class="text-slate-400 small fw-bold mb-1">EMAIL</div>
-                    <div class="small text-slate-700 mb-3"><?= htmlspecialchars($order['customer_email']) ?></div>
-                    
+                    <div class="small text-slate-700 mb-3"><?= htmlspecialchars($order['customer_email'] ?? 'N/A') ?></div>
+
                     <div class="text-slate-400 small fw-bold mb-1">ADDRESS</div>
-                    <div class="small text-slate-700"><?= nl2br(htmlspecialchars($order['customer_address'])) ?></div>
+                    <div class="small text-slate-700"><?= nl2br(htmlspecialchars($order['customer_address'] ?? 'N/A')) ?></div>
                 </div>
             </div>
 
             <!-- Order Stats -->
             <div class="bg-white p-4 rounded-4 border border-slate-100 shadow-sm mb-4">
                 <h5 class="fw-bold text-slate-800 mb-4 h6 text-uppercase tracking-wider">Order Context</h5>
-                
+
                 <div class="mb-3">
                     <div class="text-slate-400 small fw-bold mb-1">ORDER TYPE</div>
                     <span class="status-badge badge-<?= $order['order_type'] ?>">
@@ -247,25 +293,24 @@ include '../../includes/navbar.php';
                     </span>
                 </div>
 
-                <?php 
-                    // Check for linked sale
-                    $sale_stmt = $pdo->prepare("SELECT id FROM sales WHERE order_id = ?");
-                    $sale_stmt->execute([$order['id']]);
-                    $linked_sale = $sale_stmt->fetch();
+                <?php
+                // Check for linked sale
+                $sale_result = mysqli_query($conn, "SELECT id FROM sales WHERE order_id = $order_id");
+                $linked_sale = mysqli_fetch_assoc($sale_result);
                 ?>
                 <?php if ($linked_sale): ?>
-                <div class="mb-3">
-                    <div class="text-slate-400 small fw-bold mb-1">LINKED SALE</div>
-                    <a href="../sales/view.php?id=<?= $linked_sale['id'] ?>" class="fw-bold text-blue-600 small">
-                        #SALE-<?= str_pad($linked_sale['id'], 5, '0', STR_PAD_LEFT) ?>
-                        <i class="fa-solid fa-arrow-up-right-from-square ms-1" style="font-size:10px"></i>
-                    </a>
-                </div>
+                    <div class="mb-3">
+                        <div class="text-slate-400 small fw-bold mb-1">LINKED SALE</div>
+                        <a href="../sales/view.php?id=<?= $linked_sale['id'] ?>" class="fw-bold text-blue-600 small">
+                            #SALE-<?= str_pad($linked_sale['id'], 5, '0', STR_PAD_LEFT) ?>
+                            <i class="fa-solid fa-arrow-up-right-from-square ms-1" style="font-size:10px"></i>
+                        </a>
+                    </div>
                 <?php endif; ?>
-                
+
                 <div class="mb-0">
                     <div class="text-slate-400 small fw-bold mb-1">PLACED BY</div>
-                    <div class="small text-slate-700"><i class="fa-solid fa-user-tie me-1"></i> <?= htmlspecialchars($order['staff_name']) ?></div>
+                    <div class="small text-slate-700"><i class="fa-solid fa-user-tie me-1"></i> <?= htmlspecialchars($order['staff_name'] ?? 'System') ?></div>
                     <div class="small text-slate-500"><i class="fa-solid fa-clock me-1"></i> <?= date('d M, Y h:i A', strtotime($order['created_at'])) ?></div>
                 </div>
             </div>
@@ -273,7 +318,7 @@ include '../../includes/navbar.php';
             <!-- Management Actions -->
             <div class="bg-white p-4 rounded-4 border border-slate-100 shadow-sm">
                 <h5 class="fw-bold text-slate-800 mb-4 h6 text-uppercase tracking-wider">Order Management</h5>
-                
+
                 <form method="POST">
                     <input type="hidden" name="update_status" value="1">
                     <div class="mb-3">
@@ -314,16 +359,48 @@ include '../../includes/navbar.php';
         align-items: center;
         gap: 0.5rem;
     }
-    .badge-pending { background: #fff7ed; color: #ea580c; }
-    .badge-completed { background: #ecfdf5; color: #059669; }
-    .badge-cancelled { background: #fef2f2; color: #dc2626; }
-    .badge-shop { background: #f1f5f9; color: #475569; }
-    .badge-online { background: #eef2ff; color: #4f46e5; }
-    
+
+    .badge-pending {
+        background: #fff7ed;
+        color: #ea580c;
+    }
+
+    .badge-completed {
+        background: #ecfdf5;
+        color: #059669;
+    }
+
+    .badge-cancelled {
+        background: #fef2f2;
+        color: #dc2626;
+    }
+
+    .badge-shop {
+        background: #f1f5f9;
+        color: #475569;
+    }
+
+    .badge-online {
+        background: #eef2ff;
+        color: #4f46e5;
+    }
+
     @media print {
-        .includes-sidebar, .includes-navbar, .btn, .management-card { display: none !important; }
-        .px-3 { padding: 0 !important; }
-        body { background: white !important; }
+
+        .includes-sidebar,
+        .includes-navbar,
+        .btn,
+        .management-card {
+            display: none !important;
+        }
+
+        .px-3 {
+            padding: 0 !important;
+        }
+
+        body {
+            background: white !important;
+        }
     }
 </style>
 

@@ -1,15 +1,43 @@
 <?php
+
 /**
  * Profit Statistics Report - Modern Dashboard
  * Analysis of business margins and net yield
  */
-require_once __DIR__ . '/../../config/constants.php';
-require_once __DIR__ . '/../../config/db.php';
-require_once __DIR__ . '/../../core/session.php';
-require_once __DIR__ . '/../../core/auth.php';
-require_once __DIR__ . '/../../core/functions.php';
 
-authorize([ROLE_ADMIN]);
+// Start session if not already started
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
+
+// Include only database config
+require_once __DIR__ . '/../../config/db.php';
+
+// Simple authorization check
+if (!isset($_SESSION['user_id'])) {
+    header("Location: " . BASE_URL . "auth/login.php");
+    exit();
+}
+
+$user_role = $_SESSION['user_role'] ?? 0;
+$allowed_roles = [1]; // Admin only
+
+if (!in_array($user_role, $allowed_roles)) {
+    header("Location: " . BASE_URL . "index.php");
+    exit();
+}
+
+// Helper functions
+function format_price($amount)
+{
+    return 'Rs. ' . number_format($amount, 2);
+}
+
+function sanitize($data)
+{
+    global $conn;
+    return mysqli_real_escape_string($conn, htmlspecialchars(trim($data)));
+}
 
 $page_title = "Profit Analytics";
 $page_icon = "fa-chart-pie";
@@ -36,12 +64,12 @@ $profit_data = [];
 $error_message = '';
 
 try {
-    if (!$pdo) {
+    if (!$conn) {
         throw new Exception("Database connection failed");
     }
 
     // 1. Overall Stats for period
-    $stats_query = $pdo->prepare("
+    $stats_query = "
         SELECT 
            COALESCE(SUM(p.cost_price * oi.quantity), 0) as total_cost,
            COALESCE(SUM(oi.total), 0) as total_revenue,
@@ -49,19 +77,25 @@ try {
         FROM order_items oi
         JOIN orders o ON oi.order_id = o.id
         JOIN products p ON oi.product_id = p.id
-        WHERE o.status = 'completed' AND DATE(o.created_at) BETWEEN ? AND ?
-    ");
-    $stats_query->execute([$from_date, $to_date]);
-    $res = $stats_query->fetch(PDO::FETCH_ASSOC);
+        WHERE o.status = 'completed' AND DATE(o.created_at) BETWEEN '$from_date' AND '$to_date'";
+
+    $stats_result = mysqli_query($conn, $stats_query);
+    if (!$stats_result) {
+        throw new Exception(mysqli_error($conn));
+    }
+    $res = mysqli_fetch_assoc($stats_result);
 
     // Get discounts for net profit
-    $discount_query = $pdo->prepare("
+    $discount_query = "
         SELECT COALESCE(SUM(discount), 0) as total_discounts 
         FROM orders 
-        WHERE status = 'completed' AND DATE(created_at) BETWEEN ? AND ?
-    ");
-    $discount_query->execute([$from_date, $to_date]);
-    $disc_res = $discount_query->fetch(PDO::FETCH_ASSOC);
+        WHERE status = 'completed' AND DATE(created_at) BETWEEN '$from_date' AND '$to_date'";
+
+    $discount_result = mysqli_query($conn, $discount_query);
+    if (!$discount_result) {
+        throw new Exception(mysqli_error($conn));
+    }
+    $disc_res = mysqli_fetch_assoc($discount_result);
 
     if ($res) {
         $stats['total_cost'] = (float)$res['total_cost'];
@@ -69,14 +103,14 @@ try {
         $stats['gross_profit'] = (float)$res['gross_profit'];
         $stats['total_discounts'] = (float)$disc_res['total_discounts'];
         $stats['net_profit'] = $stats['gross_profit'] - $stats['total_discounts'];
-        
+
         if ($stats['total_revenue'] > 0) {
             $stats['margin_pct'] = ($stats['net_profit'] / $stats['total_revenue']) * 100;
         }
     }
 
     // 2. Daily Profit Trend (Last 30 Days)
-    $trend_query = $pdo->query("
+    $trend_query = "
         SELECT 
             DATE(o.created_at) as date, 
             SUM(oi.total - (p.cost_price * oi.quantity)) as gross_profit,
@@ -86,12 +120,15 @@ try {
         JOIN products p ON oi.product_id = p.id
         WHERE o.status = 'completed' AND o.created_at >= DATE_SUB(CURDATE(), INTERVAL 29 DAY)
         GROUP BY DATE(o.created_at)
-        ORDER BY date ASC
-    ");
-    $trend_raw = $trend_query->fetchAll(PDO::FETCH_ASSOC);
-    
+        ORDER BY date ASC";
+
+    $trend_result = mysqli_query($conn, $trend_query);
+    if (!$trend_result) {
+        throw new Exception(mysqli_error($conn));
+    }
+
     $trend_map = [];
-    foreach ($trend_raw as $row) {
+    while ($row = mysqli_fetch_assoc($trend_result)) {
         $trend_map[$row['date']] = (float)$row['gross_profit'] - (float)$row['daily_discount'];
     }
 
@@ -103,7 +140,7 @@ try {
     }
 
     // 3. Weekly/Daily Breakdown for Table
-    $breakdown_query = $pdo->prepare("
+    $breakdown_query = "
         SELECT DATE(o.created_at) as date, 
                SUM(oi.total) as revenue,
                SUM(p.cost_price * oi.quantity) as cost,
@@ -112,13 +149,18 @@ try {
         FROM order_items oi
         JOIN orders o ON oi.order_id = o.id
         JOIN products p ON oi.product_id = p.id
-        WHERE o.status = 'completed' AND DATE(o.created_at) BETWEEN ? AND ?
+        WHERE o.status = 'completed' AND DATE(o.created_at) BETWEEN '$from_date' AND '$to_date'
         GROUP BY DATE(o.created_at)
-        ORDER BY DATE(o.created_at) DESC
-    ");
-    $breakdown_query->execute([$from_date, $to_date]);
-    $daily_profit = $breakdown_query->fetchAll(PDO::FETCH_ASSOC);
+        ORDER BY DATE(o.created_at) DESC";
 
+    $breakdown_result = mysqli_query($conn, $breakdown_query);
+    if (!$breakdown_result) {
+        throw new Exception(mysqli_error($conn));
+    }
+
+    while ($row = mysqli_fetch_assoc($breakdown_result)) {
+        $daily_profit[] = $row;
+    }
 } catch (Exception $e) {
     $error_message = "Profit Report Error: " . $e->getMessage();
 }
@@ -162,17 +204,28 @@ include '../../includes/navbar.php';
     }
 
     @media print {
-        .no-print { display: none !important; }
-        .stat-card { border: 1px solid #ddd !important; box-shadow: none !important; }
+        .no-print {
+            display: none !important;
+        }
+
+        .stat-card {
+            border: 1px solid #ddd !important;
+            box-shadow: none !important;
+        }
     }
 </style>
 
 <div class="px-4 py-4">
     <!-- Header -->
     <div class="d-flex flex-wrap align-items-center justify-content-between mb-4 no-print">
-        <div>
-            <h1 class="h3 fw-bold text-slate-800 mb-1"><?= $page_title ?></h1>
-            <p class="text-slate-500 mb-0"><?= $page_description ?></p>
+        <div class="d-flex align-items-center gap-3">
+            <div class="p-3 bg-blue-50 text-blue-600 rounded-4 border border-blue-100">
+                <i class="fa-solid <?= $page_icon ?> fa-xl"></i>
+            </div>
+            <div>
+                <h1 class="h4 fw-bold text-slate-900 mb-0"><?= $page_title ?></h1>
+                <p class="text-slate-500 small mb-0"><?= $page_description ?></p>
+            </div>
         </div>
         <div class="d-flex gap-2 mt-3 mt-sm-0">
             <button class="btn btn-outline-primary rounded-3 px-3" onclick="window.print()">
@@ -361,18 +414,26 @@ include '../../includes/navbar.php';
                 responsive: true,
                 maintainAspectRatio: false,
                 plugins: {
-                    legend: { display: false }
+                    legend: {
+                        display: false
+                    }
                 },
                 scales: {
                     y: {
                         beginAtZero: true,
-                        grid: { color: 'rgba(0,0,0,0.03)' },
+                        grid: {
+                            color: 'rgba(0,0,0,0.03)'
+                        },
                         ticks: {
-                            callback: value => 'Rs. ' + value.toLocaleString()
+                            callback: function(value) {
+                                return 'Rs. ' + value.toLocaleString();
+                            }
                         }
                     },
                     x: {
-                        grid: { display: false }
+                        grid: {
+                            display: false
+                        }
                     }
                 }
             }

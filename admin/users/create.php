@@ -4,16 +4,52 @@
  * User Management - Create User
  * Professional form with role pre-selection and plain password
  */
-require_once __DIR__ . '/../../config/constants.php';
-require_once __DIR__ . '/../../config/db.php';
-require_once __DIR__ . '/../../config/app.php';
-require_once __DIR__ . '/../../core/session.php';
-require_once __DIR__ . '/../../core/auth.php';
-require_once __DIR__ . '/../../core/functions.php';
-require_once __DIR__ . '/../../core/validation.php';
 
-// Access Control
-authorize([ROLE_ADMIN]);
+// Start session if not already started
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
+
+// Include only database config
+require_once __DIR__ . '/../../config/db.php';
+
+// Simple authorization check
+if (!isset($_SESSION['user_id'])) {
+    header("Location: " . BASE_URL . "auth/login.php");
+    exit();
+}
+
+$user_role = $_SESSION['user_role'] ?? 0;
+$allowed_roles = [1]; // Admin only
+
+if (!in_array($user_role, $allowed_roles)) {
+    header("Location: " . BASE_URL . "index.php");
+    exit();
+}
+
+// Helper functions
+function set_flash_message($type, $message)
+{
+    $_SESSION['flash'] = ['type' => $type, 'message' => $message];
+}
+
+function redirect($url)
+{
+    header("Location: " . BASE_URL . $url);
+    exit();
+}
+
+function sanitize($data)
+{
+    global $conn;
+    return mysqli_real_escape_string($conn, htmlspecialchars(trim($data)));
+}
+
+// Define role constants
+define('ROLE_ADMIN', 1);
+define('ROLE_DISTRIBUTOR', 2);
+define('ROLE_STAFF', 3);
+define('ROLE_CUSTOMER', 4);
 
 // Get role from URL for pre-selection
 $preselected_role = isset($_GET['role']) ? (int)$_GET['role'] : 0;
@@ -46,22 +82,23 @@ $role_descriptions = [
 $role_description = $role_descriptions[$preselected_role] ?? 'Create a new system user';
 
 // Fetch roles for dropdown
-try {
-    $roles = $pdo->query("SELECT * FROM roles ORDER BY id ASC")->fetchAll();
-} catch (PDOException $e) {
-    $roles = [];
+$roles_result = mysqli_query($conn, "SELECT * FROM roles ORDER BY id ASC");
+$roles = [];
+if ($roles_result) {
+    while ($row = mysqli_fetch_assoc($roles_result)) {
+        $roles[] = $row;
+    }
 }
 
 $error = '';
-$success = '';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $name = sanitize($_POST['name']);
-    $email = sanitize($_POST['email']);
-    $phone = sanitize($_POST['phone']);
-    $password = $_POST['password'];
-    $role_id = (int)$_POST['role_id'];
-    $status = sanitize($_POST['status']);
+    $name = sanitize($_POST['name'] ?? '');
+    $email = sanitize($_POST['email'] ?? '');
+    $phone = sanitize($_POST['phone'] ?? '');
+    $password = $_POST['password'] ?? '';
+    $role_id = (int)($_POST['role_id'] ?? 0);
+    $status = sanitize($_POST['status'] ?? 'active');
 
     // Validation
     if (empty($name) || empty($email) || empty($password) || empty($role_id)) {
@@ -72,26 +109,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $error = "Password must be at least 3 characters long.";
     } else {
         // Check if email exists
-        $stmt = $pdo->prepare("SELECT id FROM users WHERE email = ?");
-        $stmt->execute([$email]);
-        if ($stmt->fetch()) {
+        $check_query = "SELECT id FROM users WHERE email = '$email'";
+        $check_result = mysqli_query($conn, $check_query);
+        if ($check_result && mysqli_num_rows($check_result) > 0) {
             $error = "This email is already registered in the system.";
         } else {
-            try {
-                // Hash the password
-                $hashed_password = password_hash($password, PASSWORD_DEFAULT);
+            // Hash the password
+            $hashed_password = password_hash($password, PASSWORD_DEFAULT);
 
-                $stmt = $pdo->prepare("INSERT INTO users (name, email, password, phone, role_id, status, created_at) VALUES (?, ?, ?, ?, ?, ?, NOW())");
-                if ($stmt->execute([$name, $email, $hashed_password, $phone, $role_id, $status])) {
-                    set_flash_message('success', 'User created successfully.');
+            $insert_query = "INSERT INTO users (name, email, password, phone, role_id, status, created_at) 
+                            VALUES ('$name', '$email', '$hashed_password', '$phone', $role_id, '$status', NOW())";
 
-                    // Redirect back to the list page
-                    redirect('index.php');
-                } else {
-                    $error = "Failed to create user. Please try again.";
-                }
-            } catch (PDOException $e) {
-                $error = "Database error: " . $e->getMessage();
+            if (mysqli_query($conn, $insert_query)) {
+                set_flash_message('success', 'User created successfully.');
+                // Redirect back to the list page
+                redirect('index.php' . ($preselected_role ? '?role=' . $preselected_role : ''));
+            } else {
+                $error = "Failed to create user. Please try again.";
             }
         }
     }
@@ -580,7 +614,7 @@ include '../../includes/navbar.php';
                             </div>
                             <div class="phone-hint">
                                 <i class="fa-regular fa-circle-info"></i>
-                                Optional: Enter 10-digit US number
+                                Optional: Enter 10-digit number
                             </div>
                         </div>
 

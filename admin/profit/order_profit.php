@@ -1,14 +1,42 @@
 <?php
+
 /**
  * Detailed Order-wise Profit Report
  */
-require_once __DIR__ . '/../../config/constants.php';
-require_once __DIR__ . '/../../config/db.php';
-require_once __DIR__ . '/../../core/session.php';
-require_once __DIR__ . '/../../core/auth.php';
-require_once __DIR__ . '/../../core/functions.php';
 
-authorize([ROLE_ADMIN]);
+// Start session if not already started
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
+
+// Include only database config
+require_once __DIR__ . '/../../config/db.php';
+
+// Simple authorization check
+if (!isset($_SESSION['user_id'])) {
+    header("Location: " . BASE_URL . "auth/login.php");
+    exit();
+}
+
+$user_role = $_SESSION['user_role'] ?? 0;
+$allowed_roles = [1]; // Admin only
+
+if (!in_array($user_role, $allowed_roles)) {
+    header("Location: " . BASE_URL . "index.php");
+    exit();
+}
+
+// Helper functions
+function format_price($amount)
+{
+    return 'Rs. ' . number_format($amount, 2);
+}
+
+function sanitize($data)
+{
+    global $conn;
+    return mysqli_real_escape_string($conn, htmlspecialchars(trim($data)));
+}
 
 $page_title = "Order Profit Analysis";
 $page_icon = "fa-cart-shopping";
@@ -25,34 +53,38 @@ $query = "
            (SELECT COUNT(*) FROM order_items WHERE order_id = o.id) as item_count
     FROM profits pr
     JOIN orders o ON pr.reference_id = o.id
-    LEFT JOIN customers c ON o.customer_id = c.id
+    LEFT JOIN users c ON o.customer_id = c.id
     WHERE pr.reference_type = 'order'";
 
-$params = [];
-if ($from) { $query .= " AND DATE(pr.created_at) >= ?"; $params[] = $from; }
-if ($to)   { $query .= " AND DATE(pr.created_at) <= ?"; $params[] = $to; }
+if (!empty($from)) {
+    $query .= " AND DATE(pr.created_at) >= '$from'";
+}
+if (!empty($to)) {
+    $query .= " AND DATE(pr.created_at) <= '$to'";
+}
 
 $query .= " ORDER BY pr.profit_amount DESC"; // Ranking most profitable
 
-try {
-    $stmt = $pdo->prepare($query);
-    $stmt->execute($params);
-    $orders = $stmt->fetchAll();
+$orders = [];
+$result = mysqli_query($conn, $query);
+if ($result) {
+    while ($row = mysqli_fetch_assoc($result)) {
+        $orders[] = $row;
+    }
+}
 
-    // Aggregates
-    $agg = $pdo->prepare("
-        SELECT 
-           COUNT(*) as total_orders,
-           AVG(profit_amount) as avg_profit,
-           SUM(profit_amount) as net_profit
-        FROM profits 
-        WHERE reference_type = 'order' 
-        AND DATE(created_at) >= ? AND DATE(created_at) <= ?
-    ");
-    $agg->execute([$from, $to]);
-    $summary = $agg->fetch();
+// Aggregates
+$agg_query = "
+    SELECT 
+       COUNT(*) as total_orders,
+       AVG(profit_amount) as avg_profit,
+       SUM(profit_amount) as net_profit
+    FROM profits 
+    WHERE reference_type = 'order' 
+    AND DATE(created_at) >= '$from' AND DATE(created_at) <= '$to'";
 
-} catch (PDOException $e) { $orders = []; }
+$agg_result = mysqli_query($conn, $agg_query);
+$summary = $agg_result ? mysqli_fetch_assoc($agg_result) : ['total_orders' => 0, 'avg_profit' => 0, 'net_profit' => 0];
 
 include '../../includes/header.php';
 include '../../includes/sidebar.php';
@@ -62,9 +94,14 @@ include '../../includes/navbar.php';
 <div class="px-3 py-4">
     <!-- Header -->
     <div class="d-flex align-items-center justify-content-between mb-4">
-        <div>
-            <h1 class="h4 fw-bold text-slate-900 mb-0"><?= $page_title ?></h1>
-            <p class="text-slate-500 small mb-0"><?= $page_description ?></p>
+        <div class="d-flex align-items-center gap-3">
+            <div class="p-3 bg-blue-50 text-blue-600 rounded-4 border border-blue-100">
+                <i class="fa-solid <?= $page_icon ?> fa-xl"></i>
+            </div>
+            <div>
+                <h1 class="h4 fw-bold text-slate-900 mb-0"><?= $page_title ?></h1>
+                <p class="text-slate-500 small mb-0"><?= $page_description ?></p>
+            </div>
         </div>
         <div class="d-flex gap-2">
             <button class="btn btn-dark rounded-3 px-3 py-2 fw-bold" onclick="window.print()">
@@ -152,14 +189,18 @@ include '../../includes/navbar.php';
                                     <div class="fw-black h6 mb-0 text-emerald-600">
                                         + <?= format_price($o['profit_amount']) ?>
                                     </div>
-                                    <div class="small" style="font-size: 10px; opacity: 0.6;">
-                                        Margin: <?= number_format(($o['profit_amount'] / $o['selling_price']) * 100, 1) ?>%
-                                    </div>
+                                    <?php if ($o['selling_price'] > 0): ?>
+                                        <div class="small" style="font-size: 10px; opacity: 0.6;">
+                                            Margin: <?= number_format(($o['profit_amount'] / $o['selling_price']) * 100, 1) ?>%
+                                        </div>
+                                    <?php endif; ?>
                                 </td>
                             </tr>
                         <?php endforeach; ?>
                     <?php else: ?>
-                        <tr><td colspan="7" class="text-center py-5">No order-profit data for this period.</td></tr>
+                        <tr>
+                            <td colspan="7" class="text-center py-5">No order-profit data for this period.</td>
+                        </tr>
                     <?php endif; ?>
                 </tbody>
             </table>

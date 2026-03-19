@@ -1,15 +1,43 @@
 <?php
-/**
- * Sales Performance Report - Modern Dashboard
- * Comprehensive analysis of revenue, orders, and product performance
- */
-require_once __DIR__ . '/../../config/constants.php';
-require_once __DIR__ . '/../../config/db.php';
-require_once __DIR__ . '/../../core/session.php';
-require_once __DIR__ . '/../../core/auth.php';
-require_once __DIR__ . '/../../core/functions.php';
 
-authorize([ROLE_ADMIN]);
+/**
+ * Sales Analytics - Modern Dashboard
+ * Track revenue growth and business performance metrics
+ */
+
+// Start session if not already started
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
+
+// Include only database config
+require_once __DIR__ . '/../../config/db.php';
+
+// Simple authorization check
+if (!isset($_SESSION['user_id'])) {
+    header("Location: " . BASE_URL . "auth/login.php");
+    exit();
+}
+
+$user_role = $_SESSION['user_role'] ?? 0;
+$allowed_roles = [1]; // Admin only
+
+if (!in_array($user_role, $allowed_roles)) {
+    header("Location: " . BASE_URL . "index.php");
+    exit();
+}
+
+// Helper functions
+function format_price($amount)
+{
+    return 'Rs. ' . number_format($amount, 2);
+}
+
+function sanitize($data)
+{
+    global $conn;
+    return mysqli_real_escape_string($conn, htmlspecialchars(trim($data)));
+}
 
 $page_title = "Sales Analytics";
 $page_icon = "fa-chart-line";
@@ -34,15 +62,19 @@ $recent_orders = [];
 $daily_sales = [];
 $order_type_stats = ['shop' => 0, 'online' => 0];
 
+$chart_labels = [];
+$chart_revenue = [];
+$chart_orders = [];
+
 $error_message = '';
 
 try {
-    if (!$pdo) {
+    if (!$conn) {
         throw new Exception("Database connection failed");
     }
 
     // 1. Summary Metrics
-    $stats_query = $pdo->prepare("
+    $stats_query = "
         SELECT 
             COUNT(*) as total_orders,
             SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed_orders,
@@ -50,17 +82,20 @@ try {
             COALESCE(SUM(discount), 0) as total_discounts,
             COALESCE(SUM(final_amount), 0) as net_revenue
         FROM orders 
-        WHERE DATE(created_at) BETWEEN ? AND ?
-    ");
-    $stats_query->execute([$from_date, $to_date]);
-    $raw_stats = $stats_query->fetch(PDO::FETCH_ASSOC);
+        WHERE DATE(created_at) BETWEEN '$from_date' AND '$to_date'";
+
+    $stats_result = mysqli_query($conn, $stats_query);
+    if (!$stats_result) {
+        throw new Exception(mysqli_error($conn));
+    }
+    $raw_stats = mysqli_fetch_assoc($stats_result);
 
     if ($raw_stats) {
         $stats['total_orders'] = (int)$raw_stats['total_orders'];
         $stats['gross_revenue'] = (float)$raw_stats['gross_revenue'];
         $stats['total_discounts'] = (float)$raw_stats['total_discounts'];
         $stats['net_revenue'] = (float)$raw_stats['net_revenue'];
-        
+
         if ($stats['total_orders'] > 0) {
             $stats['avg_order_value'] = $stats['net_revenue'] / $stats['total_orders'];
             $stats['completed_rate'] = ($raw_stats['completed_orders'] / $stats['total_orders']) * 100;
@@ -68,44 +103,43 @@ try {
     }
 
     // 2. Order Type Breakdown
-    $type_query = $pdo->prepare("
+    $type_query = "
         SELECT order_type, COUNT(*) as count 
         FROM orders 
-        WHERE DATE(created_at) BETWEEN ? AND ?
-        GROUP BY order_type
-    ");
-    $type_query->execute([$from_date, $to_date]);
-    while ($row = $type_query->fetch(PDO::FETCH_ASSOC)) {
-        if (isset($order_type_stats[$row['order_type']])) {
-            $order_type_stats[$row['order_type']] = (int)$row['count'];
+        WHERE DATE(created_at) BETWEEN '$from_date' AND '$to_date'
+        GROUP BY order_type";
+
+    $type_result = mysqli_query($conn, $type_query);
+    if ($type_result) {
+        while ($row = mysqli_fetch_assoc($type_result)) {
+            if (isset($order_type_stats[$row['order_type']])) {
+                $order_type_stats[$row['order_type']] = (int)$row['count'];
+            }
         }
     }
 
     // 3. Daily Sales (Last 30 Days)
-    $daily_query = $pdo->prepare("
+    $daily_query = "
         SELECT DATE(created_at) as date, SUM(final_amount) as revenue, COUNT(*) as orders
         FROM orders 
         WHERE status = 'completed' AND created_at >= DATE_SUB(CURDATE(), INTERVAL 29 DAY)
         GROUP BY DATE(created_at)
-        ORDER BY date ASC
-    ");
-    $daily_query->execute();
-    $daily_raw = $daily_query->fetchAll(PDO::FETCH_ASSOC);
-    
+        ORDER BY date ASC";
+
+    $daily_result = mysqli_query($conn, $daily_query);
+
     $daily_map = [];
-    foreach ($daily_raw as $row) {
-        $daily_map[$row['date']] = $row;
+    if ($daily_result) {
+        while ($row = mysqli_fetch_assoc($daily_result)) {
+            $daily_map[$row['date']] = $row;
+        }
     }
 
-    $chart_labels = [];
-    $chart_revenue = [];
-    $chart_orders = [];
-    
     for ($i = 29; $i >= 0; $i--) {
         $date = date('Y-m-d', strtotime("-$i days"));
         $display = date('M d', strtotime($date));
         $chart_labels[] = $display;
-        
+
         if (isset($daily_map[$date])) {
             $chart_revenue[] = (float)$daily_map[$date]['revenue'];
             $chart_orders[] = (int)$daily_map[$date]['orders'];
@@ -116,7 +150,7 @@ try {
     }
 
     // 4. Top Selling Products
-    $top_query = $pdo->prepare("
+    $top_query = "
         SELECT 
             p.name, 
             p.sku,
@@ -125,24 +159,31 @@ try {
         FROM order_items oi
         JOIN products p ON oi.product_id = p.id
         JOIN orders o ON oi.order_id = o.id
-        WHERE o.status = 'completed' AND DATE(o.created_at) BETWEEN ? AND ?
+        WHERE o.status = 'completed' AND DATE(o.created_at) BETWEEN '$from_date' AND '$to_date'
         GROUP BY oi.product_id
         ORDER BY total_revenue DESC
-        LIMIT 10
-    ");
-    $top_query->execute([$from_date, $to_date]);
-    $top_products = $top_query->fetchAll();
+        LIMIT 10";
+
+    $top_result = mysqli_query($conn, $top_query);
+    if ($top_result) {
+        while ($row = mysqli_fetch_assoc($top_result)) {
+            $top_products[] = $row;
+        }
+    }
 
     // 5. Recent High-Value Orders
-    $recent_query = $pdo->prepare("
+    $recent_query = "
         SELECT o.id, o.final_amount, o.status, o.created_at, o.order_type
         FROM orders o
         ORDER BY o.created_at DESC
-        LIMIT 5
-    ");
-    $recent_query->execute();
-    $recent_orders = $recent_query->fetchAll();
+        LIMIT 5";
 
+    $recent_result = mysqli_query($conn, $recent_query);
+    if ($recent_result) {
+        while ($row = mysqli_fetch_assoc($recent_result)) {
+            $recent_orders[] = $row;
+        }
+    }
 } catch (Exception $e) {
     $error_message = "Report Error: " . $e->getMessage();
 }
@@ -198,17 +239,28 @@ include '../../includes/navbar.php';
     }
 
     @media print {
-        .no-print { display: none !important; }
-        .stat-card { border: 1px solid #ddd !important; box-shadow: none !important; }
+        .no-print {
+            display: none !important;
+        }
+
+        .stat-card {
+            border: 1px solid #ddd !important;
+            box-shadow: none !important;
+        }
     }
 </style>
 
 <div class="px-4 py-4">
     <!-- Header -->
     <div class="d-flex flex-wrap align-items-center justify-content-between mb-4 no-print">
-        <div>
-            <h1 class="h3 fw-bold text-slate-800 mb-1"><?= $page_title ?></h1>
-            <p class="text-slate-500 mb-0"><?= $page_description ?></p>
+        <div class="d-flex align-items-center gap-3">
+            <div class="p-3 bg-blue-50 text-blue-600 rounded-4 border border-blue-100">
+                <i class="fa-solid <?= $page_icon ?> fa-xl"></i>
+            </div>
+            <div>
+                <h1 class="h4 fw-bold text-slate-900 mb-0"><?= $page_title ?></h1>
+                <p class="text-slate-500 small mb-0"><?= $page_description ?></p>
+            </div>
         </div>
         <div class="d-flex gap-2 mt-3 mt-sm-0">
             <button class="btn btn-outline-primary rounded-3 px-3" onclick="window.print()">
@@ -487,24 +539,36 @@ include '../../includes/navbar.php';
                     intersect: false,
                 },
                 plugins: {
-                    legend: { display: false }
+                    legend: {
+                        display: false
+                    }
                 },
                 scales: {
                     y: {
                         beginAtZero: true,
-                        grid: { color: 'rgba(0,0,0,0.03)' },
+                        grid: {
+                            color: 'rgba(0,0,0,0.03)'
+                        },
                         ticks: {
-                            callback: value => 'Rs. ' + value.toLocaleString()
+                            callback: function(value) {
+                                return 'Rs. ' + value.toLocaleString();
+                            }
                         }
                     },
                     y1: {
                         position: 'right',
                         beginAtZero: true,
-                        grid: { display: false },
-                        ticks: { stepSize: 1 }
+                        grid: {
+                            display: false
+                        },
+                        ticks: {
+                            stepSize: 1
+                        }
                     },
                     x: {
-                        grid: { display: false }
+                        grid: {
+                            display: false
+                        }
                     }
                 }
             }
@@ -528,7 +592,9 @@ include '../../includes/navbar.php';
                 maintainAspectRatio: false,
                 cutout: '75%',
                 plugins: {
-                    legend: { display: false }
+                    legend: {
+                        display: false
+                    }
                 }
             }
         });
@@ -544,8 +610,8 @@ include '../../includes/navbar.php';
             ["", ""],
             ["Product", "Quantity", "Revenue"]
         ];
-        
-        <?php foreach($top_products as $tp): ?>
+
+        <?php foreach ($top_products as $tp): ?>
             rows.push(["<?= addslashes($tp['name']) ?>", "<?= $tp['total_qty'] ?>", "<?= $tp['total_revenue'] ?>"]);
         <?php endforeach; ?>
 

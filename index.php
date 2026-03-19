@@ -1,24 +1,42 @@
 <?php
-require_once 'config/constants.php';
-require_once 'config/app.php';
-require_once 'core/session.php';
-require_once 'core/auth.php';
-require_once 'core/functions.php';
+// Start session if not already started
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
+
+// Include only database config
+require_once 'config/db.php';
 
 // If already logged in, redirect to dashboard based on role
-if (is_logged_in()) {
-    $role_id = $_SESSION['user_role'];
-    if ($role_id == ROLE_ADMIN) redirect('admin/dashboard.php');
-    if ($role_id == ROLE_DISTRIBUTOR) redirect('distributor/dashboard.php');
-    if ($role_id == ROLE_STAFF) redirect('staff/dashboard.php');
+if (isset($_SESSION['user_id'])) {
+    $role_id = $_SESSION['user_role'] ?? 0;
+    
+    if ($role_id == 1) { // Admin
+        header("Location: admin/dashboard.php");
+        exit();
+    }
+    if ($role_id == 2) { // Distributor
+        header("Location: distributor/dashboard.php");
+        exit();
+    }
+    if ($role_id == 3) { // Staff
+        header("Location: staff/dashboard.php");
+        exit();
+    }
+    
+    // Default redirect if role not matched
+    header("Location: dashboard.php");
+    exit();
 }
+
+$page_title = "Home";
 ?>
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title><?= htmlspecialchars(APP_NAME) ?> - Smart Inventory Solutions</title>
+    <title>Smart Inventory Solutions</title>
     <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
@@ -550,7 +568,7 @@ if (is_logged_in()) {
 
             <!-- Bottom Footer -->
             <div class="pt-10 border-t border-gray-800 text-center">
-                <p class="text-sm text-gray-500">&copy; <?= date('Y') ?> <?= htmlspecialchars(APP_NAME) ?>. All rights reserved.</p>
+                <p class="text-sm text-gray-500">&copy; <?= date('Y') ?>. All rights reserved.</p>
             </div>
         </div>
     </footer>

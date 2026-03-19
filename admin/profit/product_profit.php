@@ -1,14 +1,42 @@
 <?php
+
 /**
  * Detailed Product-wise Profit Report
  */
-require_once __DIR__ . '/../../config/constants.php';
-require_once __DIR__ . '/../../config/db.php';
-require_once __DIR__ . '/../../core/session.php';
-require_once __DIR__ . '/../../core/auth.php';
-require_once __DIR__ . '/../../core/functions.php';
 
-authorize([ROLE_ADMIN]);
+// Start session if not already started
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
+
+// Include only database config
+require_once __DIR__ . '/../../config/db.php';
+
+// Simple authorization check
+if (!isset($_SESSION['user_id'])) {
+    header("Location: " . BASE_URL . "auth/login.php");
+    exit();
+}
+
+$user_role = $_SESSION['user_role'] ?? 0;
+$allowed_roles = [1]; // Admin only
+
+if (!in_array($user_role, $allowed_roles)) {
+    header("Location: " . BASE_URL . "index.php");
+    exit();
+}
+
+// Helper functions
+function format_price($amount)
+{
+    return 'Rs. ' . number_format($amount, 2);
+}
+
+function sanitize($data)
+{
+    global $conn;
+    return mysqli_real_escape_string($conn, htmlspecialchars(trim($data)));
+}
 
 $page_title = "Product Profit Margins";
 $page_icon = "fa-box-open";
@@ -22,31 +50,31 @@ $query = "
     JOIN products p ON pr.reference_id = p.id
     WHERE pr.reference_type = 'product'";
 
-$params = [];
-if ($search) {
-    $query .= " AND (p.name LIKE ? OR p.sku LIKE ?)";
-    $params[] = "%$search%";
-    $params[] = "%$search%";
+if (!empty($search)) {
+    $query .= " AND (p.name LIKE '%$search%' OR p.sku LIKE '%$search%')";
 }
 
 $query .= " ORDER BY pr.profit_amount DESC"; // Ranking high-margin products
 
-try {
-    $stmt = $pdo->prepare($query);
-    $stmt->execute($params);
-    $products = $stmt->fetchAll();
+$products = [];
+$result = mysqli_query($conn, $query);
+if ($result) {
+    while ($row = mysqli_fetch_assoc($result)) {
+        $products[] = $row;
+    }
+}
 
-    // Stats
-    $summary = $pdo->query("
-        SELECT 
-           AVG(profit_amount / NULLIF(selling_price, 0)) * 100 as avg_margin_pct,
-           MAX(profit_amount) as max_profit,
-           MIN(profit_amount) as min_profit
-        FROM profits 
-        WHERE reference_type = 'product'
-    ")->fetch();
+// Stats
+$summary_query = "
+    SELECT 
+       AVG(profit_amount / NULLIF(selling_price, 0)) * 100 as avg_margin_pct,
+       MAX(profit_amount) as max_profit,
+       MIN(profit_amount) as min_profit
+    FROM profits 
+    WHERE reference_type = 'product'";
 
-} catch (PDOException $e) { $products = []; }
+$summary_result = mysqli_query($conn, $summary_query);
+$summary = $summary_result ? mysqli_fetch_assoc($summary_result) : ['avg_margin_pct' => 0, 'max_profit' => 0, 'min_profit' => 0];
 
 include '../../includes/header.php';
 include '../../includes/sidebar.php';
@@ -56,9 +84,14 @@ include '../../includes/navbar.php';
 <div class="px-3 py-4">
     <!-- Header -->
     <div class="d-flex align-items-center justify-content-between mb-4">
-        <div>
-            <h1 class="h4 fw-bold text-slate-900 mb-0"><?= $page_title ?></h1>
-            <p class="text-slate-500 small mb-0"><?= $page_description ?></p>
+        <div class="d-flex align-items-center gap-3">
+            <div class="p-3 bg-blue-50 text-blue-600 rounded-4 border border-blue-100">
+                <i class="fa-solid <?= $page_icon ?> fa-xl"></i>
+            </div>
+            <div>
+                <h1 class="h4 fw-bold text-slate-900 mb-0"><?= $page_title ?></h1>
+                <p class="text-slate-500 small mb-0"><?= $page_description ?></p>
+            </div>
         </div>
     </div>
 
@@ -127,16 +160,20 @@ include '../../includes/navbar.php';
                                 <td class="text-end fw-semibold text-blue-600"><?= format_price($p['selling_price']) ?></td>
                                 <td class="text-end pe-4">
                                     <div class="fw-black h6 mb-0 text-emerald-600">+ <?= format_price($p['profit_amount']) ?></div>
-                                    <div class="progress mt-1" style="height: 4px; width: 80px; margin-left: auto;">
-                                        <?php $pct = ($p['profit_amount'] / ($p['selling_price'] ?: 1)) * 100; ?>
-                                        <div class="progress-bar bg-emerald-500" role="progressbar" style="width: <?= $pct ?>%" aria-valuenow="<?= $pct ?>" aria-valuemin="0" aria-valuemax="100"></div>
-                                    </div>
-                                    <div class="small mt-1" style="font-size: 10px; opacity: 0.6;">Margin: <?= number_format($pct, 1) ?>%</div>
+                                    <?php if ($p['selling_price'] > 0): ?>
+                                        <div class="progress mt-1" style="height: 4px; width: 80px; margin-left: auto;">
+                                            <?php $pct = ($p['profit_amount'] / $p['selling_price']) * 100; ?>
+                                            <div class="progress-bar bg-emerald-500" role="progressbar" style="width: <?= $pct ?>%" aria-valuenow="<?= $pct ?>" aria-valuemin="0" aria-valuemax="100"></div>
+                                        </div>
+                                        <div class="small mt-1" style="font-size: 10px; opacity: 0.6;">Margin: <?= number_format($pct, 1) ?>%</div>
+                                    <?php endif; ?>
                                 </td>
                             </tr>
                         <?php endforeach; ?>
                     <?php else: ?>
-                        <tr><td colspan="5" class="text-center py-5">No product-wise profit metrics synchronized.</td></tr>
+                        <tr>
+                            <td colspan="5" class="text-center py-5">No product-wise profit metrics synchronized.</td>
+                        </tr>
                     <?php endif; ?>
                 </tbody>
             </table>

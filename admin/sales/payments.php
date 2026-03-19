@@ -1,14 +1,42 @@
 <?php
+
 /**
  * Sale Payments — Financial records of revenue through sales
  */
-require_once __DIR__ . '/../../config/constants.php';
-require_once __DIR__ . '/../../config/db.php';
-require_once __DIR__ . '/../../core/session.php';
-require_once __DIR__ . '/../../core/auth.php';
-require_once __DIR__ . '/../../core/functions.php';
 
-authorize([ROLE_ADMIN, ROLE_STAFF]);
+// Start session if not already started
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
+
+// Include only database config
+require_once __DIR__ . '/../../config/db.php';
+
+// Simple authorization check
+if (!isset($_SESSION['user_id'])) {
+    header("Location: " . BASE_URL . "auth/login.php");
+    exit();
+}
+
+$user_role = $_SESSION['user_role'] ?? 0;
+$allowed_roles = [1, 3]; // Admin and Staff
+
+if (!in_array($user_role, $allowed_roles)) {
+    header("Location: " . BASE_URL . "index.php");
+    exit();
+}
+
+// Helper functions
+function format_price($amount)
+{
+    return 'Rs. ' . number_format($amount, 2);
+}
+
+function sanitize($data)
+{
+    global $conn;
+    return mysqli_real_escape_string($conn, htmlspecialchars(trim($data)));
+}
 
 $sale_id = isset($_GET['sale_id']) ? (int)$_GET['sale_id'] : 0;
 $method  = isset($_GET['method'])  ? sanitize($_GET['method'])  : '';
@@ -25,42 +53,39 @@ $query = "
            u.name AS cashier_name
     FROM payments p
     JOIN sales s ON p.sale_id = s.id
-    LEFT JOIN customers c ON s.customer_id = c.id
-    LEFT JOIN users     u ON s.created_by  = u.id
+    LEFT JOIN users c ON s.customer_id = c.id
+    LEFT JOIN users u ON s.created_by  = u.id
     WHERE 1=1";
-$params = [];
 
 if ($sale_id) {
-    $query   .= " AND p.sale_id = ?";
-    $params[] = $sale_id;
+    $query .= " AND p.sale_id = $sale_id";
 }
-if ($method) {
-    $query   .= " AND p.payment_method = ?";
-    $params[] = $method;
+if (!empty($method)) {
+    $query .= " AND p.payment_method = '$method'";
 }
 
 $query .= " ORDER BY p.created_at DESC";
 
-try {
-    $stmt  = $pdo->prepare($query);
-    $stmt->execute($params);
-    $payments = $stmt->fetchAll();
-    
-    // Stats
-    $stats = $pdo->query("
-        SELECT 
-            COALESCE(SUM(amount), 0) AS total_revenue,
-            COUNT(*) AS total_count,
-            COALESCE(SUM(CASE WHEN payment_method='cash' THEN amount ELSE 0 END),0) AS cash_total,
-            COALESCE(SUM(CASE WHEN payment_method='card' THEN amount ELSE 0 END),0) AS card_total
-        FROM payments 
-        WHERE sale_id IS NOT NULL
-    ")->fetch();
-
-} catch (PDOException $e) {
-    $payments = [];
-    $stats = ['total_revenue'=>0, 'total_count'=>0, 'cash_total'=>0, 'card_total'=>0];
+$payments = [];
+$result = mysqli_query($conn, $query);
+if ($result) {
+    while ($row = mysqli_fetch_assoc($result)) {
+        $payments[] = $row;
+    }
 }
+
+// Stats
+$stats_query = "
+    SELECT 
+        COALESCE(SUM(amount), 0) AS total_revenue,
+        COUNT(*) AS total_count,
+        COALESCE(SUM(CASE WHEN payment_method='cash' THEN amount ELSE 0 END),0) AS cash_total,
+        COALESCE(SUM(CASE WHEN payment_method='card' THEN amount ELSE 0 END),0) AS card_total
+    FROM payments 
+    WHERE sale_id IS NOT NULL";
+
+$stats_result = mysqli_query($conn, $stats_query);
+$stats = $stats_result ? mysqli_fetch_assoc($stats_result) : ['total_revenue' => 0, 'total_count' => 0, 'cash_total' => 0, 'card_total' => 0];
 
 include '../../includes/header.php';
 include '../../includes/sidebar.php';
@@ -68,11 +93,38 @@ include '../../includes/navbar.php';
 ?>
 
 <style>
-    .uppercase { text-transform: uppercase; }
-    .tracking-wider { letter-spacing: .05em; }
-    .table-wrap { background: #fff; border-radius: 20px; border: 1px solid #f1f5f9; box-shadow: 0 10px 40px -15px rgba(0,0,0,.1); overflow: hidden; margin-top: 1.5rem;}
-    .stat-mini { background: #fff; padding: 1.25rem; border-radius: 16px; border: 1px solid #f1f5f9; box-shadow: 0 4px 20px -10px rgba(0,0,0,.1); }
-    .p-badge { padding: .3rem .7rem; border-radius: 10px; font-size: .65rem; font-weight: 700; text-transform: uppercase; }
+    .uppercase {
+        text-transform: uppercase;
+    }
+
+    .tracking-wider {
+        letter-spacing: .05em;
+    }
+
+    .table-wrap {
+        background: #fff;
+        border-radius: 20px;
+        border: 1px solid #f1f5f9;
+        box-shadow: 0 10px 40px -15px rgba(0, 0, 0, .1);
+        overflow: hidden;
+        margin-top: 1.5rem;
+    }
+
+    .stat-mini {
+        background: #fff;
+        padding: 1.25rem;
+        border-radius: 16px;
+        border: 1px solid #f1f5f9;
+        box-shadow: 0 4px 20px -10px rgba(0, 0, 0, .1);
+    }
+
+    .p-badge {
+        padding: .3rem .7rem;
+        border-radius: 10px;
+        font-size: .65rem;
+        font-weight: 700;
+        text-transform: uppercase;
+    }
 </style>
 
 <div class="px-3 py-4">
@@ -129,14 +181,14 @@ include '../../includes/navbar.php';
             <div class="col-lg-3">
                 <select name="method" class="form-select border-slate-200">
                     <option value="">All Payment Methods</option>
-                    <option value="cash"   <?= $method == 'cash'   ? 'selected' : '' ?>>Cash</option>
-                    <option value="bank"   <?= $method == 'bank'   ? 'selected' : '' ?>>Bank Transfer</option>
-                    <option value="card"   <?= $method == 'card'   ? 'selected' : '' ?>>Credit/Debit Card</option>
+                    <option value="cash" <?= $method == 'cash'   ? 'selected' : '' ?>>Cash</option>
+                    <option value="bank" <?= $method == 'bank'   ? 'selected' : '' ?>>Bank Transfer</option>
+                    <option value="card" <?= $method == 'card'   ? 'selected' : '' ?>>Credit/Debit Card</option>
                     <option value="online" <?= $method == 'online' ? 'selected' : '' ?>>Online Payment</option>
                 </select>
             </div>
             <div class="col-lg-2">
-                <button type="submit" class="btn btn-blue-600 text-white w-100 fw-bold rounded-3">Filter</button>
+                <button type="submit" class="btn btn-primary text-white w-100 fw-bold rounded-3">Filter</button>
             </div>
             <div class="col-lg-1">
                 <a href="payments.php" class="btn btn-light w-100 fw-bold border rounded-3">Reset</a>
@@ -163,36 +215,36 @@ include '../../includes/navbar.php';
                 <tbody>
                     <?php if (!empty($payments)): ?>
                         <?php foreach ($payments as $p): ?>
-                        <tr>
-                            <td class="ps-4 fw-bold text-blue-600">
-                                <a href="../payments/view.php?id=<?= $p['id'] ?>" class="text-decoration-none">
-                                    #PAY-<?= str_pad($p['id'], 5, '0', STR_PAD_LEFT) ?>
-                                </a>
-                            </td>
-                            <td>
-                                <a href="view.php?id=<?= $p['sale_id'] ?>" class="small fw-bold text-slate-700">
-                                    #SALE-<?= str_pad($p['sale_id'], 5, '0', STR_PAD_LEFT) ?>
-                                </a>
-                            </td>
-                            <td class="fw-semibold text-slate-800"><?= htmlspecialchars($p['customer_name'] ?? 'Walk-in') ?></td>
-                            <td>
-                                <span class="badge bg-slate-100 text-slate-600 px-2 uppercase fw-bold" style="font-size:.6rem">
-                                    <?= $p['payment_method'] ?>
-                                </span>
-                            </td>
-                            <td class="text-end fw-bold text-emerald-600">
-                                <?= format_price($p['amount']) ?>
-                            </td>
-                            <td class="text-center">
-                                <span class="p-badge" style="background:<?= $p['status'] == 'paid' ? '#ecfdf5;color:#059669' : '#fef2f2;color:#dc2626' ?>">
-                                    <?= ucfirst($p['status']) ?>
-                                </span>
-                            </td>
-                            <td class="text-slate-500 small"><?= htmlspecialchars($p['cashier_name'] ?? 'System') ?></td>
-                            <td class="text-end pe-4 text-slate-400 small">
-                                <?= date('d M Y, h:i A', strtotime($p['created_at'])) ?>
-                            </td>
-                        </tr>
+                            <tr>
+                                <td class="ps-4 fw-bold text-blue-600">
+                                    <a href="../payments/view.php?id=<?= $p['id'] ?>" class="text-decoration-none">
+                                        #PAY-<?= str_pad($p['id'], 5, '0', STR_PAD_LEFT) ?>
+                                    </a>
+                                </td>
+                                <td>
+                                    <a href="view.php?id=<?= $p['sale_id'] ?>" class="small fw-bold text-slate-700">
+                                        #SALE-<?= str_pad($p['sale_id'], 5, '0', STR_PAD_LEFT) ?>
+                                    </a>
+                                </td>
+                                <td class="fw-semibold text-slate-800"><?= htmlspecialchars($p['customer_name'] ?? 'Walk-in') ?></td>
+                                <td>
+                                    <span class="badge bg-slate-100 text-slate-600 px-2 uppercase fw-bold" style="font-size:.6rem">
+                                        <?= $p['payment_method'] ?>
+                                    </span>
+                                </td>
+                                <td class="text-end fw-bold text-emerald-600">
+                                    <?= format_price($p['amount']) ?>
+                                </td>
+                                <td class="text-center">
+                                    <span class="p-badge" style="background:<?= $p['status'] == 'paid' ? '#ecfdf5;color:#059669' : '#fef2f2;color:#dc2626' ?>">
+                                        <?= ucfirst($p['status']) ?>
+                                    </span>
+                                </td>
+                                <td class="text-slate-500 small"><?= htmlspecialchars($p['cashier_name'] ?? 'System') ?></td>
+                                <td class="text-end pe-4 text-slate-400 small">
+                                    <?= date('d M Y, h:i A', strtotime($p['created_at'])) ?>
+                                </td>
+                            </tr>
                         <?php endforeach; ?>
                     <?php else: ?>
                         <tr>

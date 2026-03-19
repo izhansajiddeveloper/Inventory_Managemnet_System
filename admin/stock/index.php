@@ -1,39 +1,71 @@
 <?php
+
 /**
  * Stock Management - Minimalist Dashboard
  */
-require_once __DIR__ . '/../../config/constants.php';
-require_once __DIR__ . '/../../config/db.php';
-require_once __DIR__ . '/../../core/session.php';
-require_once __DIR__ . '/../../core/auth.php';
-require_once __DIR__ . '/../../core/functions.php';
 
-// Access Control
-authorize([ROLE_ADMIN]);
+// Start session if not already started
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
+
+// Include only database config
+require_once __DIR__ . '/../../config/db.php';
+
+// Simple authorization check
+if (!isset($_SESSION['user_id'])) {
+    header("Location: " . BASE_URL . "auth/login.php");
+    exit();
+}
+
+$user_role = $_SESSION['user_role'] ?? 0;
+$allowed_roles = [1]; // Admin only
+
+if (!in_array($user_role, $allowed_roles)) {
+    header("Location: " . BASE_URL . "index.php");
+    exit();
+}
+
+// Helper functions
+function set_flash_message($type, $message)
+{
+    $_SESSION['flash'] = ['type' => $type, 'message' => $message];
+}
+
+function display_flash_message()
+{
+    if (isset($_SESSION['flash'])) {
+        $flash = $_SESSION['flash'];
+        $alertClass = $flash['type'] == 'success' ? 'alert-success' : 'alert-danger';
+        echo '<div class="alert ' . $alertClass . ' alert-dismissible fade show rounded-4 shadow-sm mb-4" role="alert">';
+        echo '<i class="fa-solid ' . ($flash['type'] == 'success' ? 'fa-circle-check' : 'fa-circle-exclamation') . ' me-2"></i>';
+        echo $flash['message'];
+        echo '<button type="button" class="btn-close" data-bs-dismiss="alert"></button>';
+        echo '</div>';
+        unset($_SESSION['flash']);
+    }
+}
 
 $page_title = "Stock Management";
 $page_icon = "fa-warehouse";
 $page_description = "Manage and monitor your warehouse inventory levels";
 
 // Search and Filter logic
-$search = isset($_GET['search']) ? sanitize($_GET['search']) : '';
-$status_filter = isset($_GET['status']) ? sanitize($_GET['status']) : '';
+$search = isset($_GET['search']) ? mysqli_real_escape_string($conn, $_GET['search']) : '';
+$status_filter = isset($_GET['status']) ? mysqli_real_escape_string($conn, $_GET['status']) : '';
 
 // Base query for products joined with stock
 $query = "SELECT p.*, COALESCE(s.quantity, 0) as stock_quantity 
           FROM products p 
           LEFT JOIN product_stock s ON p.id = s.product_id 
           WHERE 1=1";
-$params = [];
 
-if ($search) {
-    $query .= " AND (p.name LIKE ? OR p.sku LIKE ?)";
-    $params[] = "%$search%";
-    $params[] = "%$search%";
+if (!empty($search)) {
+    $query .= " AND (p.name LIKE '%$search%' OR p.sku LIKE '%$search%')";
 }
 
 // Filter logic by inventory status
-if ($status_filter) {
+if (!empty($status_filter)) {
     if ($status_filter == 'in_stock') {
         $query .= " AND COALESCE(s.quantity, 0) > 10";
     } elseif ($status_filter == 'low_stock') {
@@ -45,12 +77,12 @@ if ($status_filter) {
 
 $query .= " ORDER BY COALESCE(s.quantity, 0) ASC, p.name ASC";
 
-try {
-    $stmt = $pdo->prepare($query);
-    $stmt->execute($params);
-    $products = $stmt->fetchAll();
-} catch (PDOException $e) {
-    $products = [];
+$products = [];
+$result = mysqli_query($conn, $query);
+if ($result) {
+    while ($row = mysqli_fetch_assoc($result)) {
+        $products[] = $row;
+    }
 }
 
 include '../../includes/header.php';
@@ -85,18 +117,50 @@ include '../../includes/navbar.php';
         gap: 0.5rem;
     }
 
-    .badge-in { background: #ecfdf5; color: #059669; }
-    .badge-low { background: #fff7ed; color: #ea580c; }
-    .badge-out { background: #fef2f2; color: #dc2626; }
-
-    .search-wrapper { position: relative; width: 100%; }
-    .search-icon { position: absolute; left: 14px; top: 50%; transform: translateY(-50%); color: #94a3b8; }
-    .search-input { 
-        width: 100%; height: 44px; padding: 0 1rem 0 2.8rem; 
-        background: white; border: var(--border-light); 
-        border-radius: 12px; font-size: 0.9rem; transition: all 0.2s;
+    .badge-in {
+        background: #ecfdf5;
+        color: #059669;
     }
-    .search-input:focus { outline: none; border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1); }
+
+    .badge-low {
+        background: #fff7ed;
+        color: #ea580c;
+    }
+
+    .badge-out {
+        background: #fef2f2;
+        color: #dc2626;
+    }
+
+    .search-wrapper {
+        position: relative;
+        width: 100%;
+    }
+
+    .search-icon {
+        position: absolute;
+        left: 14px;
+        top: 50%;
+        transform: translateY(-50%);
+        color: #94a3b8;
+    }
+
+    .search-input {
+        width: 100%;
+        height: 44px;
+        padding: 0 1rem 0 2.8rem;
+        background: white;
+        border: var(--border-light);
+        border-radius: 12px;
+        font-size: 0.9rem;
+        transition: all 0.2s;
+    }
+
+    .search-input:focus {
+        outline: none;
+        border-color: #2563eb;
+        box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+    }
 
     .filter-btn {
         padding: 0.6rem 1.2rem;
@@ -109,20 +173,35 @@ include '../../includes/navbar.php';
         transition: all 0.2s;
         text-decoration: none;
     }
-    .filter-btn:hover, .filter-btn.active {
+
+    .filter-btn:hover,
+    .filter-btn.active {
         background: #2563eb;
         color: white;
         border-color: #2563eb;
     }
 
     .btn-add {
-        background: #2563eb; color: white;
-        padding: 0.7rem 1.4rem; border-radius: 12px;
-        font-weight: 700; font-size: 0.9rem; border: none;
-        transition: all 0.2s; display: inline-flex; align-items: center; gap: 0.6rem;
+        background: #2563eb;
+        color: white;
+        padding: 0.7rem 1.4rem;
+        border-radius: 12px;
+        font-weight: 700;
+        font-size: 0.9rem;
+        border: none;
+        transition: all 0.2s;
+        display: inline-flex;
+        align-items: center;
+        gap: 0.6rem;
         text-decoration: none;
     }
-    .btn-add:hover { background: #1d4ed8; transform: translateY(-2px); box-shadow: 0 10px 25px -8px #2563eb; color: white; }
+
+    .btn-add:hover {
+        background: #1d4ed8;
+        transform: translateY(-2px);
+        box-shadow: 0 10px 25px -8px #2563eb;
+        color: white;
+    }
 </style>
 
 <div class="px-4 py-4">
@@ -175,10 +254,10 @@ include '../../includes/navbar.php';
                 </thead>
                 <tbody>
                     <?php if (!empty($products)): ?>
-                        <?php foreach ($products as $product): 
+                        <?php foreach ($products as $product):
                             $qty = $product['stock_quantity'];
                             $status_badge = '';
-                            
+
                             if ($qty == 0) {
                                 $status_badge = '<span class="status-badge badge-out"><i class="fa-solid fa-circle-xmark"></i> Out of Stock</span>';
                             } elseif ($qty <= 10) {
@@ -225,7 +304,7 @@ include '../../includes/navbar.php';
 </div>
 
 <script>
-    document.title = "<?= $page_title ?> - <?= APP_NAME ?>";
+    document.title = "<?= $page_title ?> - Inventory System";
 </script>
 
 <?php include '../../includes/footer.php'; ?>

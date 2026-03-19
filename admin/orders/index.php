@@ -1,62 +1,92 @@
 <?php
+
 /**
  * Orders Management - Minimalist Dashboard
  */
-require_once __DIR__ . '/../../config/constants.php';
-require_once __DIR__ . '/../../config/db.php';
-require_once __DIR__ . '/../../core/session.php';
-require_once __DIR__ . '/../../core/auth.php';
-require_once __DIR__ . '/../../core/functions.php';
 
-// Access Control
-authorize([ROLE_ADMIN]);
+// Start session if not already started
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
+
+// Include only database config
+require_once __DIR__ . '/../../config/db.php';
+
+// Simple authorization check
+if (!isset($_SESSION['user_id'])) {
+    header("Location: " . BASE_URL . "auth/login.php");
+    exit();
+}
+
+$user_role = $_SESSION['user_role'] ?? 0;
+$allowed_roles = [1]; // Admin only
+
+if (!in_array($user_role, $allowed_roles)) {
+    header("Location: " . BASE_URL . "index.php");
+    exit();
+}
 
 $page_title = "Order Management";
 $page_icon = "fa-shopping-cart";
 $page_description = "Manage and track your inventory sales and fulfillment";
 
 // Search and Filter logic
-$search = isset($_GET['search']) ? sanitize($_GET['search']) : '';
-$status_filter = isset($_GET['status']) ? sanitize($_GET['status']) : '';
-$type_filter = isset($_GET['type']) ? sanitize($_GET['type']) : '';
-$date_filter = isset($_GET['date']) ? sanitize($_GET['date']) : '';
+$search = isset($_GET['search']) ? mysqli_real_escape_string($conn, $_GET['search']) : '';
+$status_filter = isset($_GET['status']) ? mysqli_real_escape_string($conn, $_GET['status']) : '';
+$type_filter = isset($_GET['type']) ? mysqli_real_escape_string($conn, $_GET['type']) : '';
+$date_filter = isset($_GET['date']) ? mysqli_real_escape_string($conn, $_GET['date']) : '';
 
 // Base query for orders joined with customers
 $query = "SELECT o.*, u.name as customer_name 
           FROM orders o 
           LEFT JOIN users u ON o.customer_id = u.id 
           WHERE 1=1";
-$params = [];
 
-if ($search) {
-    $query .= " AND (o.id LIKE ? OR c.name LIKE ?)";
-    $params[] = "%$search%";
-    $params[] = "%$search%";
+if (!empty($search)) {
+    $query .= " AND (o.id LIKE '%$search%' OR u.name LIKE '%$search%')";
 }
 
-if ($status_filter) {
-    $query .= " AND o.status = ?";
-    $params[] = $status_filter;
+if (!empty($status_filter)) {
+    $query .= " AND o.status = '$status_filter'";
 }
 
-if ($type_filter) {
-    $query .= " AND o.order_type = ?";
-    $params[] = $type_filter;
+if (!empty($type_filter)) {
+    $query .= " AND o.order_type = '$type_filter'";
 }
 
-if ($date_filter) {
-    $query .= " AND DATE(o.created_at) = ?";
-    $params[] = $date_filter;
+if (!empty($date_filter)) {
+    $query .= " AND DATE(o.created_at) = '$date_filter'";
 }
 
 $query .= " ORDER BY o.created_at DESC";
 
-try {
-    $stmt = $pdo->prepare($query);
-    $stmt->execute($params);
-    $orders = $stmt->fetchAll();
-} catch (PDOException $e) {
-    $orders = [];
+$orders = [];
+$result = mysqli_query($conn, $query);
+if ($result) {
+    while ($row = mysqli_fetch_assoc($result)) {
+        $orders[] = $row;
+    }
+}
+
+// Helper function for price formatting
+function format_price($amount)
+{
+    return 'Rs. ' . number_format($amount, 2);
+}
+
+// Helper function for flash messages
+function display_flash_message()
+{
+    if (isset($_SESSION['flash'])) {
+        $flash = $_SESSION['flash'];
+        $alertClass = $flash['type'] == 'success' ? 'alert-success' : 'alert-danger';
+        echo '<div class="alert ' . $alertClass . ' alert-dismissible fade show rounded-4 shadow-sm mb-4" role="alert">';
+        echo '<i class="fa-solid ' . ($flash['type'] == 'success' ? 'fa-circle-check' : 'fa-circle-exclamation') . ' me-2"></i>';
+        echo $flash['message'];
+        echo '<button type="button" class="btn-close" data-bs-dismiss="alert"></button>';
+        echo '</div>';
+        unset($_SESSION['flash']);
+    }
 }
 
 include '../../includes/header.php';
@@ -92,20 +122,60 @@ include '../../includes/navbar.php';
         gap: 0.5rem;
     }
 
-    .badge-pending { background: #fff7ed; color: #ea580c; }
-    .badge-completed { background: #ecfdf5; color: #059669; }
-    .badge-cancelled { background: #fef2f2; color: #dc2626; }
-    .badge-shop { background: #f1f5f9; color: #475569; }
-    .badge-online { background: #eef2ff; color: #4f46e5; }
-
-    .search-wrapper { position: relative; width: 100%; }
-    .search-icon { position: absolute; left: 14px; top: 50%; transform: translateY(-50%); color: #94a3b8; }
-    .search-input { 
-        width: 100%; height: 44px; padding: 0 1rem 0 2.8rem; 
-        background: white; border: var(--border-light); 
-        border-radius: 12px; font-size: 0.9rem; transition: all 0.2s;
+    .badge-pending {
+        background: #fff7ed;
+        color: #ea580c;
     }
-    .search-input:focus { outline: none; border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1); }
+
+    .badge-completed {
+        background: #ecfdf5;
+        color: #059669;
+    }
+
+    .badge-cancelled {
+        background: #fef2f2;
+        color: #dc2626;
+    }
+
+    .badge-shop {
+        background: #f1f5f9;
+        color: #475569;
+    }
+
+    .badge-online {
+        background: #eef2ff;
+        color: #4f46e5;
+    }
+
+    .search-wrapper {
+        position: relative;
+        width: 100%;
+    }
+
+    .search-icon {
+        position: absolute;
+        left: 14px;
+        top: 50%;
+        transform: translateY(-50%);
+        color: #94a3b8;
+    }
+
+    .search-input {
+        width: 100%;
+        height: 44px;
+        padding: 0 1rem 0 2.8rem;
+        background: white;
+        border: var(--border-light);
+        border-radius: 12px;
+        font-size: 0.9rem;
+        transition: all 0.2s;
+    }
+
+    .search-input:focus {
+        outline: none;
+        border-color: #2563eb;
+        box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+    }
 
     .filter-btn {
         padding: 0.6rem 1.2rem;
@@ -119,26 +189,49 @@ include '../../includes/navbar.php';
         text-decoration: none;
         display: inline-block;
     }
-    .filter-btn:hover, .filter-btn.active {
+
+    .filter-btn:hover,
+    .filter-btn.active {
         background: #0f172a;
         color: white;
         border-color: #0f172a;
     }
 
     .btn-create {
-        background: var(--primary); color: white;
-        padding: 0.7rem 1.4rem; border-radius: 12px;
-        font-weight: 700; font-size: 0.9rem; border: none;
-        transition: all 0.2s; display: inline-flex; align-items: center; gap: 0.6rem;
+        background: var(--primary);
+        color: white;
+        padding: 0.7rem 1.4rem;
+        border-radius: 12px;
+        font-weight: 700;
+        font-size: 0.9rem;
+        border: none;
+        transition: all 0.2s;
+        display: inline-flex;
+        align-items: center;
+        gap: 0.6rem;
         text-decoration: none;
     }
-    .btn-create:hover { background: #1d4ed8; transform: translateY(-2px); box-shadow: 0 10px 25px -8px #2563eb; color: white;}
+
+    .btn-create:hover {
+        background: #1d4ed8;
+        transform: translateY(-2px);
+        box-shadow: 0 10px 25px -8px #2563eb;
+        color: white;
+    }
 </style>
 
 <div class="px-3 py-4">
     <!-- Header -->
     <div class="d-flex align-items-center justify-content-between mb-4">
-        <h1 class="h4 fw-bold text-slate-900 mb-0"><?= $page_title ?></h1>
+        <div class="d-flex align-items-center gap-3">
+            <div class="p-3 bg-blue-50 text-blue-600 rounded-4 border border-blue-100">
+                <i class="fa-solid <?= $page_icon ?> fa-xl"></i>
+            </div>
+            <div>
+                <h1 class="h4 fw-bold text-slate-900 mb-0"><?= $page_title ?></h1>
+                <p class="text-slate-500 small mb-0"><?= $page_description ?></p>
+            </div>
+        </div>
         <a href="create.php" class="btn-create px-4">
             <i class="fa-solid fa-plus"></i>
             <span>Create Order</span>
@@ -257,7 +350,7 @@ include '../../includes/navbar.php';
 </div>
 
 <script>
-    document.title = "<?= $page_title ?> - <?= APP_NAME ?>";
+    document.title = "<?= $page_title ?> - Inventory System";
 </script>
 
 <?php include '../../includes/footer.php'; ?>

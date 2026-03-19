@@ -1,15 +1,47 @@
 <?php
+
 /**
  * Customer Intelligence & Retention Audit - Modern Dashboard
  * Analysis of customer lifecycle, spend patterns and business loyalty
  */
-require_once __DIR__ . '/../../config/constants.php';
-require_once __DIR__ . '/../../config/db.php';
-require_once __DIR__ . '/../../core/session.php';
-require_once __DIR__ . '/../../core/auth.php';
-require_once __DIR__ . '/../../core/functions.php';
 
-authorize([ROLE_ADMIN]);
+// Start session if not already started
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
+
+// Include only database config
+require_once __DIR__ . '/../../config/db.php';
+
+// Simple authorization check
+if (!isset($_SESSION['user_id'])) {
+    header("Location: " . BASE_URL . "auth/login.php");
+    exit();
+}
+
+$user_role = $_SESSION['user_role'] ?? 0;
+$allowed_roles = [1]; // Admin only
+
+if (!in_array($user_role, $allowed_roles)) {
+    header("Location: " . BASE_URL . "index.php");
+    exit();
+}
+
+// Define role constants
+define('ROLE_CUSTOMER', 4);
+define('ROLE_DISTRIBUTOR', 2);
+
+// Helper functions
+function format_price($amount)
+{
+    return 'Rs. ' . number_format($amount, 2);
+}
+
+function sanitize($data)
+{
+    global $conn;
+    return mysqli_real_escape_string($conn, htmlspecialchars(trim($data)));
+}
 
 $page_title = "Buyer Intelligence";
 $page_icon = "fa-users-viewfinder";
@@ -30,22 +62,28 @@ $stats = [
 $acquisition_data = [];
 $segmentation_data = [0, 0, 0]; // 1 Order, 2-5 Orders, 6+ Orders
 $top_customers = [];
+$trend_labels = [];
+$trend_values = [];
+$error_message = '';
 
 try {
-    if (!$pdo) {
+    if (!$conn) {
         throw new Exception("Database connection failed");
     }
 
     // 1. Core Summary Stats
-    $total_cust_q = $pdo->query("SELECT COUNT(*) as count FROM users WHERE role_id IN (" . ROLE_CUSTOMER . ", " . ROLE_DISTRIBUTOR . ")");
-    $stats['total_customers'] = (int)$total_cust_q->fetch(PDO::FETCH_ASSOC)['count'];
+    $total_cust_q = mysqli_query($conn, "SELECT COUNT(*) as count FROM users WHERE role_id IN (" . ROLE_CUSTOMER . ", " . ROLE_DISTRIBUTOR . ")");
+    if ($total_cust_q) {
+        $stats['total_customers'] = (int)mysqli_fetch_assoc($total_cust_q)['count'];
+    }
 
-    $new_cust_q = $pdo->prepare("SELECT COUNT(*) as count FROM users WHERE role_id IN (" . ROLE_CUSTOMER . ", " . ROLE_DISTRIBUTOR . ") AND DATE(created_at) BETWEEN ? AND ?");
-    $new_cust_q->execute([$from_date, $to_date]);
-    $stats['new_customers'] = (int)$new_cust_q->fetch(PDO::FETCH_ASSOC)['count'];
+    $new_cust_q = mysqli_query($conn, "SELECT COUNT(*) as count FROM users WHERE role_id IN (" . ROLE_CUSTOMER . ", " . ROLE_DISTRIBUTOR . ") AND DATE(created_at) BETWEEN '$from_date' AND '$to_date'");
+    if ($new_cust_q) {
+        $stats['new_customers'] = (int)mysqli_fetch_assoc($new_cust_q)['count'];
+    }
 
     // LTV and Repeat Rate
-    $ltv_query = $pdo->query("
+    $ltv_query = mysqli_query($conn, "
         SELECT 
             COUNT(DISTINCT customer_id) as ordering_customers,
             SUM(final_amount) as total_revenue,
@@ -57,27 +95,31 @@ try {
             GROUP BY customer_id
         ) as customer_orders
     ");
-    $ltv_res = $ltv_query->fetch(PDO::FETCH_ASSOC);
 
-    if ($ltv_res && $ltv_res['ordering_customers'] > 0) {
-        $stats['avg_customer_ltv'] = (float)$ltv_res['total_revenue'] / $ltv_res['ordering_customers'];
-        $stats['repeat_rate'] = ((int)$ltv_res['repeat_customers'] / $ltv_res['ordering_customers']) * 100;
+    if ($ltv_query) {
+        $ltv_res = mysqli_fetch_assoc($ltv_query);
+        if ($ltv_res && $ltv_res['ordering_customers'] > 0) {
+            $stats['avg_customer_ltv'] = (float)$ltv_res['total_revenue'] / $ltv_res['ordering_customers'];
+            $stats['repeat_rate'] = ((int)$ltv_res['repeat_customers'] / $ltv_res['ordering_customers']) * 100;
+        }
     }
 
     // 2. Acquisition Trend (Last 30 Days)
-    $trend_query = $pdo->query("
+    $trend_query = mysqli_query($conn, "
         SELECT DATE(created_at) as date, COUNT(*) as count 
         FROM users 
         WHERE role_id IN (" . ROLE_CUSTOMER . ", " . ROLE_DISTRIBUTOR . ") AND created_at >= DATE_SUB(CURDATE(), INTERVAL 29 DAY)
         GROUP BY DATE(created_at)
         ORDER BY date ASC
     ");
-    $trend_raw = $trend_query->fetchAll(PDO::FETCH_ASSOC);
-    $trend_map = [];
-    foreach ($trend_raw as $row) { $trend_map[$row['date']] = (int)$row['count']; }
 
-    $trend_labels = [];
-    $trend_values = [];
+    $trend_map = [];
+    if ($trend_query) {
+        while ($row = mysqli_fetch_assoc($trend_query)) {
+            $trend_map[$row['date']] = (int)$row['count'];
+        }
+    }
+
     for ($i = 29; $i >= 0; $i--) {
         $date = date('Y-m-d', strtotime("-$i days"));
         $trend_labels[] = date('M d', strtotime($date));
@@ -85,20 +127,32 @@ try {
     }
 
     // 3. Customer Segmentation
-    $seg_query = $pdo->query("
+    $seg_query = mysqli_query($conn, "
         SELECT 
             SUM(CASE WHEN orders = 1 THEN 1 ELSE 0 END) as single,
             SUM(CASE WHEN orders BETWEEN 2 AND 5 THEN 1 ELSE 0 END) as frequent,
             SUM(CASE WHEN orders > 5 THEN 1 ELSE 0 END) as elite
-        FROM (SELECT customer_id, COUNT(*) as orders FROM orders WHERE status = 'completed' GROUP BY customer_id) as order_counts
+        FROM (
+            SELECT customer_id, COUNT(*) as orders 
+            FROM orders 
+            WHERE status = 'completed' 
+            GROUP BY customer_id
+        ) as order_counts
     ");
-    $seg_res = $seg_query->fetch(PDO::FETCH_ASSOC);
-    if ($seg_res) {
-        $segmentation_data = [(int)$seg_res['single'], (int)$seg_res['frequent'], (int)$seg_res['elite']];
+
+    if ($seg_query) {
+        $seg_res = mysqli_fetch_assoc($seg_query);
+        if ($seg_res) {
+            $segmentation_data = [
+                (int)($seg_res['single'] ?? 0),
+                (int)($seg_res['frequent'] ?? 0),
+                (int)($seg_res['elite'] ?? 0)
+            ];
+        }
     }
 
     // 4. Elite Customer List
-    $elite_query = $pdo->prepare("
+    $elite_query = mysqli_query($conn, "
         SELECT 
             u.name, u.email, u.phone, u.role_id,
             COUNT(o.id) as order_count,
@@ -106,14 +160,17 @@ try {
             MAX(o.created_at) as last_order_date
         FROM users u
         JOIN orders o ON u.id = o.customer_id
-        WHERE o.status = 'completed' AND DATE(o.created_at) BETWEEN ? AND ?
+        WHERE o.status = 'completed' AND DATE(o.created_at) BETWEEN '$from_date' AND '$to_date'
         GROUP BY u.id
         ORDER BY total_spend DESC
         LIMIT 10
     ");
-    $elite_query->execute([$from_date, $to_date]);
-    $top_customers = $elite_query->fetchAll(PDO::FETCH_ASSOC);
 
+    if ($elite_query) {
+        while ($row = mysqli_fetch_assoc($elite_query)) {
+            $top_customers[] = $row;
+        }
+    }
 } catch (Exception $e) {
     $error_message = "Customer Audit Error: " . $e->getMessage();
 }
@@ -136,24 +193,48 @@ include '../../includes/navbar.php';
         background: white;
     }
 
-    .stat-card:hover { transform: translateY(-2px); box-shadow: 0 0.5rem 1rem rgba(0, 0, 0, 0.08) !important; }
+    .stat-card:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 0.5rem 1rem rgba(0, 0, 0, 0.08) !important;
+    }
 
-    .chart-container { position: relative; min-height: 250px; width: 100%; }
+    .chart-container {
+        position: relative;
+        min-height: 250px;
+        width: 100%;
+    }
 
-    .table th { font-weight: 600; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.5px; color: #64748b; }
+    .table th {
+        font-weight: 600;
+        font-size: 0.75rem;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        color: #64748b;
+    }
 
     @media print {
-        .no-print { display: none !important; }
-        .stat-card { border: 1px solid #ddd !important; box-shadow: none !important; }
+        .no-print {
+            display: none !important;
+        }
+
+        .stat-card {
+            border: 1px solid #ddd !important;
+            box-shadow: none !important;
+        }
     }
 </style>
 
 <div class="px-4 py-4">
     <!-- Header -->
     <div class="d-flex flex-wrap align-items-center justify-content-between mb-4 no-print">
-        <div>
-            <h1 class="h3 fw-bold text-slate-800 mb-1"><?= $page_title ?></h1>
-            <p class="text-slate-500 mb-0"><?= $page_description ?></p>
+        <div class="d-flex align-items-center gap-3">
+            <div class="p-3 bg-blue-50 text-blue-600 rounded-4 border border-blue-100">
+                <i class="fa-solid <?= $page_icon ?> fa-xl"></i>
+            </div>
+            <div>
+                <h1 class="h4 fw-bold text-slate-900 mb-0"><?= $page_title ?></h1>
+                <p class="text-slate-500 small mb-0"><?= $page_description ?></p>
+            </div>
         </div>
         <div class="d-flex gap-2 mt-3 mt-sm-0">
             <button class="btn btn-outline-primary rounded-3 px-3" onclick="window.print()">
@@ -315,8 +396,8 @@ include '../../includes/navbar.php';
                                                 <div>
                                                     <div class="fw-bold text-slate-800">
                                                         <?= htmlspecialchars($tc['name']) ?>
-                                                        <span class="badge bg-<?= $tc['role_id'] == ROLE_DISTRIBUTOR ? 'indigo' : 'slate' ?>-50 text-<?= $tc['role_id'] == ROLE_DISTRIBUTOR ? 'indigo' : 'slate' ?>-600 border border-<?= $tc['role_id'] == ROLE_DISTRIBUTOR ? 'indigo' : 'slate' ?>-100 smaller ms-1" style="font-size: 0.6rem;">
-                                                            <?= $tc['role_id'] == ROLE_DISTRIBUTOR ? 'Distributor' : 'Customer' ?>
+                                                        <span class="badge bg-<?= ($tc['role_id'] == ROLE_DISTRIBUTOR) ? 'indigo' : 'slate' ?>-50 text-<?= ($tc['role_id'] == ROLE_DISTRIBUTOR) ? 'indigo' : 'slate' ?>-600 border border-<?= ($tc['role_id'] == ROLE_DISTRIBUTOR) ? 'indigo' : 'slate' ?>-100 smaller ms-1" style="font-size: 0.6rem;">
+                                                            <?= ($tc['role_id'] == ROLE_DISTRIBUTOR) ? 'Distributor' : 'Customer' ?>
                                                         </span>
                                                     </div>
                                                     <div class="smaller text-slate-400"><?= htmlspecialchars($tc['email'] ?: $tc['phone']) ?></div>
@@ -371,10 +452,26 @@ include '../../includes/navbar.php';
             options: {
                 responsive: true,
                 maintainAspectRatio: false,
-                plugins: { legend: { display: false } },
+                plugins: {
+                    legend: {
+                        display: false
+                    }
+                },
                 scales: {
-                    y: { beginAtZero: true, grid: { color: 'rgba(0,0,0,0.02)' }, ticks: { stepSize: 1 } },
-                    x: { grid: { display: false } }
+                    y: {
+                        beginAtZero: true,
+                        grid: {
+                            color: 'rgba(0,0,0,0.02)'
+                        },
+                        ticks: {
+                            stepSize: 1
+                        }
+                    },
+                    x: {
+                        grid: {
+                            display: false
+                        }
+                    }
                 }
             }
         });
@@ -396,7 +493,11 @@ include '../../includes/navbar.php';
                 responsive: true,
                 maintainAspectRatio: false,
                 cutout: '75%',
-                plugins: { legend: { display: false } }
+                plugins: {
+                    legend: {
+                        display: false
+                    }
+                }
             }
         });
     });

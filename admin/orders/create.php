@@ -1,40 +1,70 @@
 <?php
+
 /**
  * Create New Order
  * Auto-creates a linked Sale record on every order.
  */
-require_once __DIR__ . '/../../config/constants.php';
-require_once __DIR__ . '/../../config/db.php';
-require_once __DIR__ . '/../../core/session.php';
-require_once __DIR__ . '/../../core/auth.php';
-require_once __DIR__ . '/../../core/functions.php';
 
-authorize([ROLE_ADMIN, ROLE_STAFF]);
+// Start session if not already started
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
+
+// Include only database config
+require_once __DIR__ . '/../../config/db.php';
+
+// Simple authorization check
+if (!isset($_SESSION['user_id'])) {
+    header("Location: " . BASE_URL . "auth/login.php");
+    exit();
+}
+
+$user_role = $_SESSION['user_role'] ?? 0;
+$allowed_roles = [1, 3]; // Admin, Staff
+
+if (!in_array($user_role, $allowed_roles)) {
+    header("Location: " . BASE_URL . "index.php");
+    exit();
+}
 
 $page_title       = "Create New Order";
 $page_icon        = "fa-cart-plus";
 $page_description = "Generate a new sales order — a linked sale record is created automatically";
 
 // Fetch products with stock
-try {
-    $products = $pdo->query("
+$products = [];
+$customers = [];
+
+if (isset($conn) && $conn !== null) {
+    // Products query
+    $result = mysqli_query($conn, "
         SELECT p.id, p.name, p.sku, p.selling_price,
                COALESCE(ps.quantity, 0) AS stock
         FROM products p
         LEFT JOIN product_stock ps ON p.id = ps.product_id
         WHERE p.status = 'active' AND COALESCE(ps.quantity, 0) > 0
         ORDER BY p.name ASC
-    ")->fetchAll();
+    ");
 
-    $customers = $pdo->query("
+    if ($result) {
+        while ($row = mysqli_fetch_assoc($result)) {
+            $products[] = $row;
+        }
+    }
+
+    // Customers query (role_id 2 = Distributor, 4 = Customer)
+    $result = mysqli_query($conn, "
         SELECT id, name, phone, role_id 
         FROM users 
-        WHERE role_id IN (" . ROLE_CUSTOMER . ", " . ROLE_DISTRIBUTOR . ") 
-          AND status = 'active'
+        WHERE role_id IN (2, 4) AND status = 'active'
         ORDER BY name ASC
-    ")->fetchAll();
-} catch (PDOException $e) {
-    die("Error fetching data: " . $e->getMessage());
+    ");
+
+    if ($result) {
+        while ($row = mysqli_fetch_assoc($result)) {
+            $customers[] = $row;
+        }
+    }
 }
 
 $errors = [];
@@ -44,11 +74,11 @@ $errors = [];
 // ───────────────────────────────────────────────
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $customer_id      = !empty($_POST['customer_id']) ? (int)$_POST['customer_id'] : null;
-    $order_type       = sanitize($_POST['order_type']);
+    $order_type       = mysqli_real_escape_string($conn, $_POST['order_type'] ?? '');
     $discount         = (float)($_POST['discount'] ?? 0);
     $delivery_charges = ($order_type === 'online') ? (float)($_POST['delivery_charges'] ?? 0) : 0;
-    $payment_method   = sanitize($_POST['payment_method']);
-    $amount_paid      = (float)($_POST['amount_paid'] ?? 0);  // Partial or full
+    $payment_method   = mysqli_real_escape_string($conn, $_POST['payment_method'] ?? '');
+    $amount_paid      = (float)($_POST['amount_paid'] ?? 0);
 
     $product_ids = $_POST['product_id'] ?? [];
     $quantities  = $_POST['quantity']   ?? [];
@@ -67,15 +97,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $qty   = (int)($quantities[$index] ?? 0);
         $price = (float)($prices[$index]   ?? 0);
 
-        if ($qty <= 0) { $errors[] = "Quantity must be > 0 for all items."; continue; }
+        if ($qty <= 0) {
+            $errors[] = "Quantity must be > 0 for all items.";
+            continue;
+        }
 
-        $st = $pdo->prepare("SELECT quantity FROM product_stock WHERE product_id = ?");
-        $st->execute([$pid]);
-        $avail = (int)$st->fetchColumn();
+        // Check stock
+        $st = mysqli_query($conn, "SELECT quantity FROM product_stock WHERE product_id = $pid");
+        $avail = 0;
+        if ($st && mysqli_num_rows($st) > 0) {
+            $row = mysqli_fetch_assoc($st);
+            $avail = (int)$row['quantity'];
+        }
+
         if ($qty > $avail) {
-            $sn = $pdo->prepare("SELECT name FROM products WHERE id = ?");
-            $sn->execute([$pid]);
-            $errors[] = "Insufficient stock for '" . $sn->fetchColumn() . "'. Available: $avail";
+            $sn = mysqli_query($conn, "SELECT name FROM products WHERE id = $pid");
+            $product_name = 'Product';
+            if ($sn && mysqli_num_rows($sn) > 0) {
+                $prow = mysqli_fetch_assoc($sn);
+                $product_name = $prow['name'];
+            }
+            $errors[] = "Insufficient stock for '$product_name'. Available: $avail";
         }
 
         $item_total    = $price * $qty;
@@ -93,12 +135,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if ($amount_paid > $final_amount + 0.01)      $errors[] = "Amount paid cannot exceed the order total.";
 
     // ───────────────────────────────────────────
-    // 3. Execute (atomic transaction)
+    // 3. Execute (atomic transaction) - MySQLi doesn't support transactions well, but we'll try
     // ───────────────────────────────────────────
     if (empty($errors)) {
+        // Start transaction
+        mysqli_begin_transaction($conn);
+
         try {
-            $pdo->beginTransaction();
-            $created_by = $_SESSION[SESSION_USER_ID] ?? 1;
+            $created_by = $_SESSION['user_id'] ?? 1;
 
             // ── A. Determine statuses from payment amount
             $is_fully_paid  = ($amount_paid >= $final_amount - 0.01);
@@ -108,77 +152,73 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $payment_status = $is_fully_paid ? 'paid' : ($has_payment ? 'partial' : 'unpaid');
 
             // ── B. Insert Order
-            $pdo->prepare("
-                INSERT INTO orders (customer_id, created_by, order_type, total_amount, discount, delivery_charges, final_amount, status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ")->execute([$customer_id, $created_by, $order_type, $total_amount, $discount, $delivery_charges, $final_amount, $order_status]);
-            $order_id = $pdo->lastInsertId();
+            $customer_sql = $customer_id ? $customer_id : 'NULL';
+            $order_sql = "INSERT INTO orders (customer_id, created_by, order_type, total_amount, discount, delivery_charges, final_amount, status)
+                         VALUES (" . ($customer_id ? $customer_id : 'NULL') . ", $created_by, '$order_type', $total_amount, $discount, $delivery_charges, $final_amount, '$order_status')";
+
+            mysqli_query($conn, $order_sql);
+            $order_id = mysqli_insert_id($conn);
+
+            if (!$order_id) {
+                throw new Exception("Failed to create order");
+            }
 
             // ── C. Insert Order Items + deduct stock + log transactions
             foreach ($items_to_process as $item) {
                 // Order item
-                $pdo->prepare("
-                    INSERT INTO order_items (order_id, product_id, quantity, price, total)
-                    VALUES (?, ?, ?, ?, ?)
-                ")->execute([$order_id, $item['product_id'], $item['quantity'], $item['price'], $item['total']]);
+                $item_sql = "INSERT INTO order_items (order_id, product_id, quantity, price, total)
+                            VALUES ($order_id, {$item['product_id']}, {$item['quantity']}, {$item['price']}, {$item['total']})";
+                mysqli_query($conn, $item_sql);
 
-                // Deduct stock immediately (regardless of payment status)
-                $pdo->prepare("
-                    UPDATE product_stock SET quantity = quantity - ? WHERE product_id = ?
-                ")->execute([$item['quantity'], $item['product_id']]);
+                // Deduct stock immediately
+                $update_sql = "UPDATE product_stock SET quantity = quantity - {$item['quantity']} WHERE product_id = {$item['product_id']}";
+                mysqli_query($conn, $update_sql);
 
                 // Stock transaction log
-                $pdo->prepare("
-                    INSERT INTO product_transactions (product_id, quantity, type, reference_type, reference_id, created_by, note)
-                    VALUES (?, ?, 'OUT', 'order', ?, ?, ?)
-                ")->execute([
-                    $item['product_id'],
-                    $item['quantity'],
-                    $order_id,
-                    $created_by,
-                    "Order #$order_id — " . ($order_type === 'shop' ? 'Shop Sale' : 'Online Order'),
-                ]);
+                $note = "Order #$order_id — " . ($order_type === 'shop' ? 'Shop Sale' : 'Online Order');
+                $trans_sql = "INSERT INTO product_transactions (product_id, quantity, type, reference_type, reference_id, created_by, note)
+                             VALUES ({$item['product_id']}, {$item['quantity']}, 'OUT', 'order', $order_id, $created_by, '$note')";
+                mysqli_query($conn, $trans_sql);
             }
 
             // ── D. Auto-create linked Sale record
-            $pdo->prepare("
-                INSERT INTO sales (order_id, customer_id, created_by, total_amount, discount, final_amount, status)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            ")->execute([$order_id, $customer_id, $created_by, $total_amount, $discount, $final_amount, $sale_status]);
-            $sale_id = $pdo->lastInsertId();
+            $sale_sql = "INSERT INTO sales (order_id, customer_id, created_by, total_amount, discount, final_amount, status)
+                        VALUES ($order_id, " . ($customer_id ? $customer_id : 'NULL') . ", $created_by, $total_amount, $discount, $final_amount, '$sale_status')";
+            mysqli_query($conn, $sale_sql);
+            $sale_id = mysqli_insert_id($conn);
 
             // ── E. Copy order_items → sale_items
-            //      (sale_items.total is a STORED GENERATED column, do NOT insert it)
             foreach ($items_to_process as $item) {
-                $pdo->prepare("
-                    INSERT INTO sale_items (sale_id, product_id, quantity, price)
-                    VALUES (?, ?, ?, ?)
-                ")->execute([$sale_id, $item['product_id'], $item['quantity'], $item['price']]);
+                $sale_item_sql = "INSERT INTO sale_items (sale_id, product_id, quantity, price)
+                                 VALUES ($sale_id, {$item['product_id']}, {$item['quantity']}, {$item['price']})";
+                mysqli_query($conn, $sale_item_sql);
             }
 
             // ── F. Insert Payment (if any amount provided)
             if ($has_payment) {
-                $pdo->prepare("
-                    INSERT INTO payments (order_id, sale_id, payment_method, amount, status)
-                    VALUES (?, ?, ?, ?, ?)
-                ")->execute([$order_id, $sale_id, $payment_method, $amount_paid, $payment_status]);
+                $payment_sql = "INSERT INTO payments (order_id, sale_id, payment_method, amount, status)
+                               VALUES ($order_id, $sale_id, '$payment_method', $amount_paid, '$payment_status')";
+                mysqli_query($conn, $payment_sql);
             }
 
-            $pdo->commit();
+            // Commit transaction
+            mysqli_commit($conn);
 
-            $msg = "Order #ORD-" . str_pad($order_id,5,'0',STR_PAD_LEFT) . " & Sale #SALE-" . str_pad($sale_id,5,'0',STR_PAD_LEFT) . " created.";
+            $msg = "Order #ORD-" . str_pad($order_id, 5, '0', STR_PAD_LEFT) . " & Sale #SALE-" . str_pad($sale_id, 5, '0', STR_PAD_LEFT) . " created.";
             $msg .= $has_payment ? " Payment: " . ucfirst($payment_status) . "." : " No payment recorded.";
-            set_flash_message('success', $msg);
+
+            // Set flash message in session
+            $_SESSION['flash'] = ['type' => 'success', 'message' => $msg];
 
             // POS Flow: Redirect to Sale View for shop orders, Invoice for others
             if ($order_type === 'shop') {
-                redirect('admin/sales/view.php?id=' . $sale_id);
+                header('Location: ' . BASE_URL . 'admin/sales/view.php?id=' . $sale_id);
             } else {
-                redirect('admin/orders/invoice/index.php?order_id=' . $order_id);
+                header('Location: ' . BASE_URL . 'admin/orders/invoice/index.php?order_id=' . $order_id);
             }
-
-        } catch (PDOException $e) {
-            $pdo->rollBack();
+            exit();
+        } catch (Exception $e) {
+            mysqli_rollback($conn);
             $errors[] = "Database Error: " . $e->getMessage();
         }
     }
@@ -189,11 +229,23 @@ include '../../includes/sidebar.php';
 include '../../includes/navbar.php';
 ?>
 
+<!-- Rest of your HTML/CSS/JavaScript remains exactly the same -->
 <style>
-    .uppercase       { text-transform: uppercase; }
-    .tracking-wider  { letter-spacing: .05em; }
-    .x-small         { font-size: .72rem; }
-    .qty-input.is-invalid { border-color: #ef4444; }
+    .uppercase {
+        text-transform: uppercase;
+    }
+
+    .tracking-wider {
+        letter-spacing: .05em;
+    }
+
+    .x-small {
+        font-size: .72rem;
+    }
+
+    .qty-input.is-invalid {
+        border-color: #ef4444;
+    }
 </style>
 
 <div class="px-3 py-4">
@@ -212,7 +264,7 @@ include '../../includes/navbar.php';
 
     <?php if (!empty($errors)): ?>
         <div class="alert alert-danger rounded-4 shadow-sm mb-4">
-            <ul class="mb-0"><?php foreach ($errors as $error) echo "<li>$error</li>"; ?></ul>
+            <ul class="mb-0"><?php foreach ($errors as $error) echo "<li>" . htmlspecialchars($error) . "</li>"; ?></ul>
         </div>
     <?php endif; ?>
 
@@ -232,9 +284,9 @@ include '../../includes/navbar.php';
                                 <option value="">-- Walk-in / No Customer --</option>
                                 <?php foreach ($customers as $c): ?>
                                     <option value="<?= $c['id'] ?>">
-                                        <?= htmlspecialchars($c['name']) ?> 
-                                        (<?= $c['phone'] ?>) - 
-                                        <?= $c['role_id'] == ROLE_DISTRIBUTOR ? 'Distributor' : 'Customer' ?>
+                                        <?= htmlspecialchars($c['name']) ?>
+                                        (<?= htmlspecialchars($c['phone']) ?>) -
+                                        <?= $c['role_id'] == 2 ? 'Distributor' : 'Customer' ?>
                                     </option>
                                 <?php endforeach; ?>
                             </select>
@@ -361,22 +413,22 @@ include '../../includes/navbar.php';
 </div>
 
 <script>
-const inventory = <?= json_encode($products) ?>;
-let rowCount = 0;
+    const inventory = <?= json_encode($products) ?>;
+    let rowCount = 0;
 
-function addRow() {
-    rowCount++;
-    document.getElementById('emptyItems').style.display = 'none';
-    const tbody = document.querySelector('#productTable tbody');
-    const tr    = document.createElement('tr');
-    tr.id       = `row-${rowCount}`;
+    function addRow() {
+        rowCount++;
+        document.getElementById('emptyItems').style.display = 'none';
+        const tbody = document.querySelector('#productTable tbody');
+        const tr = document.createElement('tr');
+        tr.id = `row-${rowCount}`;
 
-    let opts = '<option value="">-- Select Product --</option>';
-    inventory.forEach(p => {
-        opts += `<option value="${p.id}" data-price="${p.selling_price}" data-stock="${p.stock}">${p.name} (Stock: ${p.stock})</option>`;
-    });
+        let opts = '<option value="">-- Select Product --</option>';
+        inventory.forEach(p => {
+            opts += `<option value="${p.id}" data-price="${p.selling_price}" data-stock="${p.stock}">${p.name} (Stock: ${p.stock})</option>`;
+        });
 
-    tr.innerHTML = `
+        tr.innerHTML = `
         <td>
             <select name="product_id[]" class="form-select rounded-3 py-2 border-slate-200 product-select" onchange="updateRow(${rowCount})" required>
                 ${opts}
@@ -397,92 +449,111 @@ function addRow() {
                 <i class="fa-solid fa-trash"></i>
             </button>
         </td>`;
-    tbody.appendChild(tr);
-}
-
-function removeRow(id) {
-    document.getElementById(`row-${id}`)?.remove();
-    if (!document.querySelectorAll('#productTable tbody tr').length)
-        document.getElementById('emptyItems').style.display = 'block';
-    calculateSummary();
-}
-
-function updateRow(id) {
-    const row   = document.getElementById(`row-${id}`);
-    const sel   = row.querySelector('.product-select');
-    const pInp  = row.querySelector('.price-input');
-    const qInp  = row.querySelector('.qty-input');
-    const tDisp = row.querySelector('.total-display');
-    const alert = row.querySelector('.stock-alert');
-    const opt   = sel.options[sel.selectedIndex];
-    if (opt.value) {
-        const price = parseFloat(opt.dataset.price);
-        const stock = parseInt(opt.dataset.stock);
-        const qty   = parseInt(qInp.value) || 0;
-        pInp.value  = price.toFixed(2);
-        if (qty > stock) { alert.style.display='block'; qInp.classList.add('is-invalid'); }
-        else             { alert.style.display='none';  qInp.classList.remove('is-invalid'); }
-        tDisp.value = 'Rs. ' + (price * qty).toLocaleString(undefined, {minimumFractionDigits:2});
-    } else {
-        pInp.value = ''; tDisp.value = 'Rs. 0.00'; alert.style.display='none';
+        tbody.appendChild(tr);
     }
-    calculateSummary();
-}
 
-function calculateSummary() {
-    let subtotal = 0;
-    document.querySelectorAll('.total-display').forEach(d => {
-        subtotal += parseFloat(d.value.replace('Rs. ','').replace(/,/g,'')) || 0;
-    });
-    const disc     = parseFloat(document.getElementById('discount').value)  || 0;
-    const delivery = parseFloat(document.getElementById('delivery')?.value) || 0;
-    const final    = Math.max(0, subtotal - disc + delivery);
-
-    document.getElementById('displaySubtotal').innerText = 'Rs. ' + subtotal.toLocaleString(undefined,{minimumFractionDigits:2});
-    document.getElementById('displayFinal').innerText    = 'Rs. ' + final.toLocaleString(undefined,{minimumFractionDigits:2});
-    updateChange();
-}
-
-function updateChange() {
-    const finalText = document.getElementById('displayFinal').innerText;
-    const total  = parseFloat(finalText.replace('Rs. ','').replace(/,/g,'')) || 0;
-    const paid   = parseFloat(document.getElementById('amountPaid').value) || 0;
-    const box    = document.getElementById('changeBox');
-    if (paid > 0) {
-        box.classList.remove('d-none');
-        const diff = paid - total;
-        document.getElementById('changeLabel').textContent = diff >= 0 ? 'Change Due' : 'Balance Remaining';
-        document.getElementById('changeAmt').className  = diff >= 0 ? 'fw-bold text-emerald-600' : 'fw-bold text-rose-600';
-        document.getElementById('changeAmt').innerText  = 'Rs. ' + Math.abs(diff).toLocaleString(undefined,{minimumFractionDigits:2});
-        box.style.background = diff >= 0 ? '#f0fdf4' : '#fef2f2';
-        box.style.borderColor= diff >= 0 ? '#bbf7d0' : '#fecaca';
-    } else {
-        box.classList.add('d-none');
-    }
-}
-
-// Toggle delivery field
-document.getElementById('orderType').addEventListener('change', function() {
-    const df = document.getElementById('deliveryField');
-    df.style.display = this.value === 'online' ? 'block' : 'none';
-    if (this.value !== 'online') {
-        document.getElementById('delivery').value = 0;
+    function removeRow(id) {
+        document.getElementById(`row-${id}`)?.remove();
+        if (!document.querySelectorAll('#productTable tbody tr').length)
+            document.getElementById('emptyItems').style.display = 'block';
         calculateSummary();
     }
-});
 
-// Submit validation
-document.getElementById('orderForm').addEventListener('submit', function(e) {
-    if (document.querySelector('.qty-input.is-invalid')) {
-        e.preventDefault(); alert('Fix stock quantity errors before submitting.'); return;
+    function updateRow(id) {
+        const row = document.getElementById(`row-${id}`);
+        const sel = row.querySelector('.product-select');
+        const pInp = row.querySelector('.price-input');
+        const qInp = row.querySelector('.qty-input');
+        const tDisp = row.querySelector('.total-display');
+        const alert = row.querySelector('.stock-alert');
+        const opt = sel.options[sel.selectedIndex];
+        if (opt.value) {
+            const price = parseFloat(opt.dataset.price);
+            const stock = parseInt(opt.dataset.stock);
+            const qty = parseInt(qInp.value) || 0;
+            pInp.value = price.toFixed(2);
+            if (qty > stock) {
+                alert.style.display = 'block';
+                qInp.classList.add('is-invalid');
+            } else {
+                alert.style.display = 'none';
+                qInp.classList.remove('is-invalid');
+            }
+            tDisp.value = 'Rs. ' + (price * qty).toLocaleString(undefined, {
+                minimumFractionDigits: 2
+            });
+        } else {
+            pInp.value = '';
+            tDisp.value = 'Rs. 0.00';
+            alert.style.display = 'none';
+        }
+        calculateSummary();
     }
-    if (!document.querySelectorAll('#productTable tbody tr').length) {
-        e.preventDefault(); alert('Please add at least one product.'); return;
-    }
-});
 
-// Start with one row
-addRow();
+    function calculateSummary() {
+        let subtotal = 0;
+        document.querySelectorAll('.total-display').forEach(d => {
+            subtotal += parseFloat(d.value.replace('Rs. ', '').replace(/,/g, '')) || 0;
+        });
+        const disc = parseFloat(document.getElementById('discount').value) || 0;
+        const delivery = parseFloat(document.getElementById('delivery')?.value) || 0;
+        const final = Math.max(0, subtotal - disc + delivery);
+
+        document.getElementById('displaySubtotal').innerText = 'Rs. ' + subtotal.toLocaleString(undefined, {
+            minimumFractionDigits: 2
+        });
+        document.getElementById('displayFinal').innerText = 'Rs. ' + final.toLocaleString(undefined, {
+            minimumFractionDigits: 2
+        });
+        updateChange();
+    }
+
+    function updateChange() {
+        const finalText = document.getElementById('displayFinal').innerText;
+        const total = parseFloat(finalText.replace('Rs. ', '').replace(/,/g, '')) || 0;
+        const paid = parseFloat(document.getElementById('amountPaid').value) || 0;
+        const box = document.getElementById('changeBox');
+        if (paid > 0) {
+            box.classList.remove('d-none');
+            const diff = paid - total;
+            document.getElementById('changeLabel').textContent = diff >= 0 ? 'Change Due' : 'Balance Remaining';
+            document.getElementById('changeAmt').className = diff >= 0 ? 'fw-bold text-emerald-600' : 'fw-bold text-rose-600';
+            document.getElementById('changeAmt').innerText = 'Rs. ' + Math.abs(diff).toLocaleString(undefined, {
+                minimumFractionDigits: 2
+            });
+            box.style.background = diff >= 0 ? '#f0fdf4' : '#fef2f2';
+            box.style.borderColor = diff >= 0 ? '#bbf7d0' : '#fecaca';
+        } else {
+            box.classList.add('d-none');
+        }
+    }
+
+    // Toggle delivery field
+    document.getElementById('orderType').addEventListener('change', function() {
+        const df = document.getElementById('deliveryField');
+        df.style.display = this.value === 'online' ? 'block' : 'none';
+        if (this.value !== 'online') {
+            document.getElementById('delivery').value = 0;
+            calculateSummary();
+        }
+    });
+
+    // Submit validation
+    document.getElementById('orderForm').addEventListener('submit', function(e) {
+        if (document.querySelector('.qty-input.is-invalid')) {
+            e.preventDefault();
+            alert('Fix stock quantity errors before submitting.');
+            return;
+        }
+        if (!document.querySelectorAll('#productTable tbody tr').length) {
+            e.preventDefault();
+            alert('Please add at least one product.');
+            return;
+        }
+    });
+
+    // Start with one row
+    addRow();
 </script>
 
 <?php include '../../includes/footer.php'; ?>

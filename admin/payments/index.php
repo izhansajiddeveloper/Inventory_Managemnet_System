@@ -1,26 +1,61 @@
 <?php
+
 /**
  * Payment Management - Dashboard
  */
-require_once __DIR__ . '/../../config/constants.php';
-require_once __DIR__ . '/../../config/db.php';
-require_once __DIR__ . '/../../core/session.php';
-require_once __DIR__ . '/../../core/auth.php';
-require_once __DIR__ . '/../../core/functions.php';
 
-// Access Control
-authorize([ROLE_ADMIN, ROLE_STAFF]);
+// Start session if not already started
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
+
+// Include only database config
+require_once __DIR__ . '/../../config/db.php';
+
+// Simple authorization check
+if (!isset($_SESSION['user_id'])) {
+    header("Location: " . BASE_URL . "auth/login.php");
+    exit();
+}
+
+$user_role = $_SESSION['user_role'] ?? 0;
+$allowed_roles = [1, 3]; // Admin and Staff
+
+if (!in_array($user_role, $allowed_roles)) {
+    header("Location: " . BASE_URL . "index.php");
+    exit();
+}
 
 $page_title = "Payments History";
 $page_icon = "fa-receipt";
 $page_description = "Monitor and manage customer payments across all orders and sales";
 
+// Helper functions
+function format_price($amount)
+{
+    return 'Rs. ' . number_format($amount, 2);
+}
+
+function display_flash_message()
+{
+    if (isset($_SESSION['flash'])) {
+        $flash = $_SESSION['flash'];
+        $alertClass = $flash['type'] == 'success' ? 'alert-success' : 'alert-danger';
+        echo '<div class="alert ' . $alertClass . ' alert-dismissible fade show rounded-4 shadow-sm mb-4" role="alert">';
+        echo '<i class="fa-solid ' . ($flash['type'] == 'success' ? 'fa-circle-check' : 'fa-circle-exclamation') . ' me-2"></i>';
+        echo $flash['message'];
+        echo '<button type="button" class="btn-close" data-bs-dismiss="alert"></button>';
+        echo '</div>';
+        unset($_SESSION['flash']);
+    }
+}
+
 // Search and Filter logic
-$search = isset($_GET['search']) ? sanitize($_GET['search']) : '';
-$status_filter = isset($_GET['status']) ? sanitize($_GET['status']) : '';
-$method_filter = isset($_GET['method']) ? sanitize($_GET['method']) : '';
-$start_date = isset($_GET['start_date']) ? sanitize($_GET['start_date']) : '';
-$end_date = isset($_GET['end_date']) ? sanitize($_GET['end_date']) : '';
+$search = isset($_GET['search']) ? mysqli_real_escape_string($conn, $_GET['search']) : '';
+$status_filter = isset($_GET['status']) ? mysqli_real_escape_string($conn, $_GET['status']) : '';
+$method_filter = isset($_GET['method']) ? mysqli_real_escape_string($conn, $_GET['method']) : '';
+$start_date = isset($_GET['start_date']) ? mysqli_real_escape_string($conn, $_GET['start_date']) : '';
+$end_date = isset($_GET['end_date']) ? mysqli_real_escape_string($conn, $_GET['end_date']) : '';
 
 // Base query for payments joined with orders and sales
 $query = "SELECT p.*, o.id as order_id, s.id as sale_id,
@@ -33,57 +68,48 @@ $query = "SELECT p.*, o.id as order_id, s.id as sale_id,
           LEFT JOIN orders o ON p.order_id = o.id 
           LEFT JOIN sales s ON p.sale_id = s.id
           WHERE 1=1";
-$params = [];
 
-if ($search) {
-    $query .= " AND (p.order_id LIKE ? OR p.sale_id LIKE ? OR p.transaction_id LIKE ?)";
-    $params[] = "%$search%";
-    $params[] = "%$search%";
-    $params[] = "%$search%";
+if (!empty($search)) {
+    $query .= " AND (p.order_id LIKE '%$search%' OR p.sale_id LIKE '%$search%' OR p.transaction_id LIKE '%$search%')";
 }
 
-if ($status_filter) {
-    $query .= " AND p.status = ?";
-    $params[] = $status_filter;
+if (!empty($status_filter)) {
+    $query .= " AND p.status = '$status_filter'";
 }
 
-if ($method_filter) {
-    $query .= " AND p.payment_method = ?";
-    $params[] = $method_filter;
+if (!empty($method_filter)) {
+    $query .= " AND p.payment_method = '$method_filter'";
 }
 
-if ($start_date) {
-    $query .= " AND DATE(p.created_at) >= ?";
-    $params[] = $start_date;
+if (!empty($start_date)) {
+    $query .= " AND DATE(p.created_at) >= '$start_date'";
 }
 
-if ($end_date) {
-    $query .= " AND DATE(p.created_at) <= ?";
-    $params[] = $end_date;
+if (!empty($end_date)) {
+    $query .= " AND DATE(p.created_at) <= '$end_date'";
 }
 
 $query .= " ORDER BY p.created_at DESC";
 
-try {
-    $stmt = $pdo->prepare($query);
-    $stmt->execute($params);
-    $payments = $stmt->fetchAll();
-
-    // Stats
-    $stats_query = "SELECT 
-        COUNT(*) as total_payments,
-        SUM(amount) as total_amount,
-        SUM(CASE WHEN payment_method = 'cash' THEN amount ELSE 0 END) as cash_total,
-        SUM(CASE WHEN payment_method = 'online' THEN amount ELSE 0 END) as online_total
-        FROM payments";
-    $stats = $pdo->query($stats_query)->fetch();
-
-} catch (PDOException $e) {
-    $payments = [];
-    $stats = ['total_payments' => 0, 'total_amount' => 0, 'cash_total' => 0, 'online_total' => 0];
+$payments = [];
+$result = mysqli_query($conn, $query);
+if ($result) {
+    while ($row = mysqli_fetch_assoc($result)) {
+        $payments[] = $row;
+    }
 }
 
-$page_title = "Payments History";
+// Stats
+$stats_query = "SELECT 
+    COUNT(*) as total_payments,
+    SUM(amount) as total_amount,
+    SUM(CASE WHEN payment_method = 'cash' THEN amount ELSE 0 END) as cash_total,
+    SUM(CASE WHEN payment_method = 'online' THEN amount ELSE 0 END) as online_total
+    FROM payments";
+
+$stats_result = mysqli_query($conn, $stats_query);
+$stats = $stats_result ? mysqli_fetch_assoc($stats_result) : ['total_payments' => 0, 'total_amount' => 0, 'cash_total' => 0, 'online_total' => 0];
+
 include '../../includes/header.php';
 include '../../includes/sidebar.php';
 include '../../includes/navbar.php';
@@ -105,27 +131,141 @@ include '../../includes/navbar.php';
         transition: all 0.3s;
     }
 
-    .stat-card:hover { transform: translateY(-5px); }
-    .stat-icon { width: 48px; height: 48px; border-radius: 12px; display: flex; align-items: center; justify-content: center; font-size: 1.4rem; margin-bottom: 1rem; }
-    .stat-value { font-size: 1.2rem; font-weight: 800; color: #0f172a; margin-bottom: 0.2rem; }
-    .stat-label { font-size: 0.7rem; font-weight: 600; color: #64748b; text-transform: uppercase; letter-spacing: 0.05em; }
+    .stat-card:hover {
+        transform: translateY(-5px);
+    }
 
-    .table-container { background: white; border-radius: 20px; border: var(--border-light); box-shadow: var(--card-shadow); overflow: hidden; margin-top: 1.5rem; }
-    .status-badge { padding: 0.4rem 1rem; border-radius: 10px; font-size: 0.7rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; display: inline-flex; align-items: center; gap: 0.5rem; }
-    
-    .badge-paid { background: #ecfdf5; color: #059669; }
-    .badge-partial { background: #fff7ed; color: #ea580c; }
-    .badge-unpaid { background: #fef2f2; color: #dc2626; }
-    .badge-cash { background: #f1f5f9; color: #475569; }
-    .badge-online { background: #eef2ff; color: #4f46e5; }
+    .stat-icon {
+        width: 48px;
+        height: 48px;
+        border-radius: 12px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 1.4rem;
+        margin-bottom: 1rem;
+    }
 
-    .search-wrapper { position: relative; width: 100%; }
-    .search-icon { position: absolute; left: 14px; top: 50%; transform: translateY(-50%); color: #94a3b8; }
-    .search-input { width: 100%; height: 44px; padding: 0 1rem 0 2.8rem; background: white; border: var(--border-light); border-radius: 12px; font-size: 0.9rem; transition: all 0.2s; }
-    .search-input:focus { outline: none; border-color: #2563eb; }
+    .stat-value {
+        font-size: 1.2rem;
+        font-weight: 800;
+        color: #0f172a;
+        margin-bottom: 0.2rem;
+    }
 
-    .btn-create { background: var(--primary); color: white; padding: 0.7rem 1.4rem; border-radius: 12px; font-weight: 700; font-size: 0.9rem; border: none; transition: all 0.2s; display: inline-flex; align-items: center; gap: 0.6rem; text-decoration: none; }
-    .btn-create:hover { background: #1d4ed8; color: white; transform: translateY(-2px); }
+    .stat-label {
+        font-size: 0.7rem;
+        font-weight: 600;
+        color: #64748b;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+    }
+
+    .table-container {
+        background: white;
+        border-radius: 20px;
+        border: var(--border-light);
+        box-shadow: var(--card-shadow);
+        overflow: hidden;
+        margin-top: 1.5rem;
+    }
+
+    .status-badge {
+        padding: 0.4rem 1rem;
+        border-radius: 10px;
+        font-size: 0.7rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+        display: inline-flex;
+        align-items: center;
+        gap: 0.5rem;
+    }
+
+    .badge-paid {
+        background: #ecfdf5;
+        color: #059669;
+    }
+
+    .badge-partial {
+        background: #fff7ed;
+        color: #ea580c;
+    }
+
+    .badge-unpaid {
+        background: #fef2f2;
+        color: #dc2626;
+    }
+
+    .badge-cash {
+        background: #f1f5f9;
+        color: #475569;
+    }
+
+    .badge-online {
+        background: #eef2ff;
+        color: #4f46e5;
+    }
+
+    .badge-bank {
+        background: #fef3c7;
+        color: #b45309;
+    }
+
+    .badge-card {
+        background: #e0e7ff;
+        color: #4338ca;
+    }
+
+    .search-wrapper {
+        position: relative;
+        width: 100%;
+    }
+
+    .search-icon {
+        position: absolute;
+        left: 14px;
+        top: 50%;
+        transform: translateY(-50%);
+        color: #94a3b8;
+    }
+
+    .search-input {
+        width: 100%;
+        height: 44px;
+        padding: 0 1rem 0 2.8rem;
+        background: white;
+        border: var(--border-light);
+        border-radius: 12px;
+        font-size: 0.9rem;
+        transition: all 0.2s;
+    }
+
+    .search-input:focus {
+        outline: none;
+        border-color: #2563eb;
+    }
+
+    .btn-create {
+        background: var(--primary);
+        color: white;
+        padding: 0.7rem 1.4rem;
+        border-radius: 12px;
+        font-weight: 700;
+        font-size: 0.9rem;
+        border: none;
+        transition: all 0.2s;
+        display: inline-flex;
+        align-items: center;
+        gap: 0.6rem;
+        text-decoration: none;
+    }
+
+    .btn-create:hover {
+        background: #1d4ed8;
+        color: white;
+        transform: translateY(-2px);
+    }
 </style>
 
 <div class="px-3 py-4">
@@ -152,28 +292,28 @@ include '../../includes/navbar.php';
         <div class="col-md-3">
             <div class="stat-card">
                 <div class="stat-icon bg-indigo-50 text-indigo-600"><i class="fa-solid fa-wallet"></i></div>
-                <div class="stat-value text-indigo-600"><?= format_price($stats['total_amount']) ?></div>
+                <div class="stat-value text-indigo-600"><?= format_price($stats['total_amount'] ?? 0) ?></div>
                 <div class="stat-label">Total Collected</div>
             </div>
         </div>
         <div class="col-md-3">
             <div class="stat-card">
                 <div class="stat-icon bg-emerald-50 text-emerald-600"><i class="fa-solid fa-money-bill-wave"></i></div>
-                <div class="stat-value text-emerald-600"><?= format_price($stats['cash_total']) ?></div>
+                <div class="stat-value text-emerald-600"><?= format_price($stats['cash_total'] ?? 0) ?></div>
                 <div class="stat-label">Cash Total</div>
             </div>
         </div>
         <div class="col-md-3">
             <div class="stat-card">
                 <div class="stat-icon bg-blue-50 text-blue-600"><i class="fa-solid fa-credit-card"></i></div>
-                <div class="stat-value text-blue-600"><?= format_price($stats['online_total']) ?></div>
+                <div class="stat-value text-blue-600"><?= format_price($stats['online_total'] ?? 0) ?></div>
                 <div class="stat-label">Online Total</div>
             </div>
         </div>
         <div class="col-md-3">
             <div class="stat-card">
                 <div class="stat-icon bg-amber-50 text-amber-600"><i class="fa-solid fa-file-invoice-dollar"></i></div>
-                <div class="stat-value text-amber-600"><?= number_format($stats['total_payments']) ?></div>
+                <div class="stat-value text-amber-600"><?= number_format($stats['total_payments'] ?? 0) ?></div>
                 <div class="stat-label">Transactions</div>
             </div>
         </div>
@@ -207,7 +347,7 @@ include '../../includes/navbar.php';
                 <input type="date" name="end_date" class="form-control rounded-3 py-2 border-slate-200" value="<?= $end_date ?>">
             </div>
             <div class="col-lg-2">
-                <button type="submit" class="btn btn-dark w-100 py-2 rounded-3 fw-bold">Apply Fitler</button>
+                <button type="submit" class="btn btn-dark w-100 py-2 rounded-3 fw-bold">Apply Filter</button>
             </div>
             <div class="col-lg-1">
                 <a href="index.php" class="btn btn-light w-100 py-2 rounded-3 border text-slate-500" title="Reset"><i class="fa-solid fa-rotate-left"></i></a>
@@ -235,13 +375,13 @@ include '../../includes/navbar.php';
                         <?php foreach ($payments as $p): ?>
                             <tr>
                                 <td class="ps-4">
-                                    <span class="fw-bold text-slate-800">#PAY-<?= str_pad($p['id'], 5, '0', STR_PAD_LEFT) ?></span>
+                                    <a href="view.php?id=<?= $p['id'] ?>" class="fw-bold text-slate-800 text-decoration-none">#PAY-<?= str_pad($p['id'], 5, '0', STR_PAD_LEFT) ?></a>
                                 </td>
                                 <td>
-                                    <?php if($p['order_id']): ?>
-                                        <a href="../orders/view.php?id=<?= $p['order_id'] ?>" class="fw-bold text-blue-600 text-decoration-none small">ORD#<?= $p['order_id'] ?></a>
-                                    <?php elseif($p['sale_id']): ?>
-                                        <a href="../sales/view.php?id=<?= $p['sale_id'] ?>" class="fw-bold text-purple-600 text-decoration-none small">SALE#<?= $p['sale_id'] ?></a>
+                                    <?php if ($p['order_id']): ?>
+                                        <a href="../orders/view.php?id=<?= $p['order_id'] ?>" class="fw-bold text-blue-600 text-decoration-none small">ORD#<?= str_pad($p['order_id'], 5, '0', STR_PAD_LEFT) ?></a>
+                                    <?php elseif ($p['sale_id']): ?>
+                                        <a href="../sales/view.php?id=<?= $p['sale_id'] ?>" class="fw-bold text-purple-600 text-decoration-none small">SALE#<?= str_pad($p['sale_id'], 5, '0', STR_PAD_LEFT) ?></a>
                                     <?php endif; ?>
                                 </td>
                                 <td>
@@ -249,10 +389,10 @@ include '../../includes/navbar.php';
                                 </td>
                                 <td>
                                     <span class="status-badge badge-<?= $p['payment_method'] ?>">
-                                        <i class="fa-solid <?= in_array($p['payment_method'], ['cash', 'card']) ? 'fa-money-bill-1' : 'fa-credit-card' ?>"></i>
+                                        <i class="fa-solid <?= in_array($p['payment_method'], ['cash']) ? 'fa-money-bill-wave' : (in_array($p['payment_method'], ['card']) ? 'fa-credit-card' : 'fa-building-columns') ?>"></i>
                                         <?= strtoupper($p['payment_method']) ?>
                                     </span>
-                                    <?php if($p['transaction_id']): ?>
+                                    <?php if ($p['transaction_id']): ?>
                                         <div class="small text-slate-400 mt-1">TRX: <?= htmlspecialchars($p['transaction_id']) ?></div>
                                     <?php endif; ?>
                                 </td>
