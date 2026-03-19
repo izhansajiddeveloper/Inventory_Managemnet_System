@@ -948,7 +948,7 @@ include __DIR__ . '/../includes/navbar.php';
         <div class="table-card">
             <div class="table-header">
                 <h3 class="table-title">Top Selling Products</h3>
-                <a href="products.php" class="view-all">View All</a>
+                <a href="../admin/products/index.php" class="view-all">View All</a>
             </div>
             <table class="custom-table">
                 <thead>
@@ -1034,7 +1034,7 @@ include __DIR__ . '/../includes/navbar.php';
         <div class="table-card">
             <div class="table-header">
                 <h3 class="table-title">Recent Orders</h3>
-                <a href="orders.php" class="view-all">View All</a>
+                <a href="../admin/orders/index.php" class="view-all">View All</a>
             </div>
             <table class="custom-table">
                 <thead>
@@ -1081,7 +1081,7 @@ include __DIR__ . '/../includes/navbar.php';
         <div class="table-card">
             <div class="table-header">
                 <h3 class="table-title">Activity Log</h3>
-                <a href="audit.php" class="view-all">View All</a>
+
             </div>
             <div class="activity-list">
                 <?php if (empty($recent_activity)): ?>
@@ -1120,7 +1120,7 @@ include __DIR__ . '/../includes/navbar.php';
     <div class="table-card" style="margin-top: 24px;">
         <div class="table-header">
             <h3 class="table-title">Top Distributors Performance</h3>
-            <a href="distributors.php" class="view-all">View All</a>
+            <a href="../admin/users/index.php" class="view-all">View All</a>
         </div>
         <table class="custom-table">
             <thead>
