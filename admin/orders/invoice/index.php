@@ -20,7 +20,7 @@ try {
     // Fetch Order
     $order_stmt = $pdo->prepare("SELECT o.*, c.name as customer_name, c.email as customer_email, c.phone as customer_phone, c.address as customer_address 
                                 FROM orders o 
-                                LEFT JOIN customers c ON o.customer_id = c.id 
+                                LEFT JOIN users c ON o.customer_id = c.id 
                                 WHERE o.id = ?");
     $order_stmt->execute([$order_id]);
     $order = $order_stmt->fetch();

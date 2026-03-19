@@ -26,7 +26,13 @@ try {
         ORDER BY p.name ASC
     ")->fetchAll();
 
-    $customers = $pdo->query("SELECT id, name, phone FROM customers ORDER BY name ASC")->fetchAll();
+    $customers = $pdo->query("
+        SELECT id, name, phone, role_id 
+        FROM users 
+        WHERE role_id IN (" . ROLE_CUSTOMER . ", " . ROLE_DISTRIBUTOR . ") 
+          AND status = 'active'
+        ORDER BY name ASC
+    ")->fetchAll();
 } catch (PDOException $e) {
     die("Error fetching data: " . $e->getMessage());
 }
@@ -221,11 +227,15 @@ include '../../includes/navbar.php';
                     <h5 class="fw-bold text-slate-800 mb-4 h6 text-uppercase tracking-wider">Order Information</h5>
                     <div class="row g-3">
                         <div class="col-md-6">
-                            <label class="form-label small fw-bold text-slate-600">Select Customer</label>
+                            <label class="form-label small fw-bold text-slate-600">Select Customer / Distributor</label>
                             <select name="customer_id" class="form-select rounded-3 py-2">
                                 <option value="">-- Walk-in / No Customer --</option>
                                 <?php foreach ($customers as $c): ?>
-                                    <option value="<?= $c['id'] ?>"><?= htmlspecialchars($c['name']) ?> (<?= $c['phone'] ?>)</option>
+                                    <option value="<?= $c['id'] ?>">
+                                        <?= htmlspecialchars($c['name']) ?> 
+                                        (<?= $c['phone'] ?>) - 
+                                        <?= $c['role_id'] == ROLE_DISTRIBUTOR ? 'Distributor' : 'Customer' ?>
+                                    </option>
                                 <?php endforeach; ?>
                             </select>
                         </div>

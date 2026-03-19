@@ -28,7 +28,7 @@ $query = "
            o.order_type,
            COALESCE((SELECT SUM(p2.amount) FROM payments p2 WHERE p2.sale_id = s.id OR (s.order_id IS NOT NULL AND p2.order_id = s.order_id)), 0) AS total_paid
     FROM sales s
-    LEFT JOIN customers c ON s.customer_id = c.id
+    LEFT JOIN users     c ON s.customer_id = c.id
     LEFT JOIN users     u ON s.created_by  = u.id
     LEFT JOIN orders    o ON s.order_id    = o.id
     WHERE 1=1";

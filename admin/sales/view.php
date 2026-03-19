@@ -23,7 +23,7 @@ try {
                o.order_type,
                o.delivery_charges
         FROM sales s
-        LEFT JOIN customers c ON s.customer_id = c.id
+        LEFT JOIN users c ON s.customer_id = c.id
         LEFT JOIN users u     ON s.created_by  = u.id
         LEFT JOIN orders o    ON s.order_id    = o.id
         WHERE s.id = ?

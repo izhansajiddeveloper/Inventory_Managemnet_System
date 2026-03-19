@@ -22,9 +22,9 @@ $type_filter = isset($_GET['type']) ? sanitize($_GET['type']) : '';
 $date_filter = isset($_GET['date']) ? sanitize($_GET['date']) : '';
 
 // Base query for orders joined with customers
-$query = "SELECT o.*, c.name as customer_name 
+$query = "SELECT o.*, u.name as customer_name 
           FROM orders o 
-          LEFT JOIN customers c ON o.customer_id = c.id 
+          LEFT JOIN users u ON o.customer_id = u.id 
           WHERE 1=1";
 $params = [];
 

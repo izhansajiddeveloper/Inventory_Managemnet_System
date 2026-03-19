@@ -11,9 +11,9 @@ require_once __DIR__ . '/../../core/functions.php';
 
 authorize([ROLE_ADMIN]);
 
-$page_title = "Customer Intelligence";
+$page_title = "Buyer Intelligence";
 $page_icon = "fa-users-viewfinder";
-$page_description = "Monitor customer acquisition metrics and lifecycle revenue performance";
+$page_description = "Monitor customer & distributor acquisition metrics and lifecycle revenue performance";
 
 // Filters
 $from_date = isset($_GET['from']) ? sanitize($_GET['from']) : date('Y-m-01');
@@ -37,10 +37,10 @@ try {
     }
 
     // 1. Core Summary Stats
-    $total_cust_q = $pdo->query("SELECT COUNT(*) as count FROM customers");
+    $total_cust_q = $pdo->query("SELECT COUNT(*) as count FROM users WHERE role_id IN (" . ROLE_CUSTOMER . ", " . ROLE_DISTRIBUTOR . ")");
     $stats['total_customers'] = (int)$total_cust_q->fetch(PDO::FETCH_ASSOC)['count'];
 
-    $new_cust_q = $pdo->prepare("SELECT COUNT(*) as count FROM customers WHERE DATE(created_at) BETWEEN ? AND ?");
+    $new_cust_q = $pdo->prepare("SELECT COUNT(*) as count FROM users WHERE role_id IN (" . ROLE_CUSTOMER . ", " . ROLE_DISTRIBUTOR . ") AND DATE(created_at) BETWEEN ? AND ?");
     $new_cust_q->execute([$from_date, $to_date]);
     $stats['new_customers'] = (int)$new_cust_q->fetch(PDO::FETCH_ASSOC)['count'];
 
@@ -67,8 +67,8 @@ try {
     // 2. Acquisition Trend (Last 30 Days)
     $trend_query = $pdo->query("
         SELECT DATE(created_at) as date, COUNT(*) as count 
-        FROM customers 
-        WHERE created_at >= DATE_SUB(CURDATE(), INTERVAL 29 DAY)
+        FROM users 
+        WHERE role_id IN (" . ROLE_CUSTOMER . ", " . ROLE_DISTRIBUTOR . ") AND created_at >= DATE_SUB(CURDATE(), INTERVAL 29 DAY)
         GROUP BY DATE(created_at)
         ORDER BY date ASC
     ");
@@ -100,14 +100,14 @@ try {
     // 4. Elite Customer List
     $elite_query = $pdo->prepare("
         SELECT 
-            c.name, c.email, c.phone,
+            u.name, u.email, u.phone, u.role_id,
             COUNT(o.id) as order_count,
             COALESCE(SUM(o.final_amount), 0) as total_spend,
             MAX(o.created_at) as last_order_date
-        FROM customers c
-        JOIN orders o ON c.id = o.customer_id
+        FROM users u
+        JOIN orders o ON u.id = o.customer_id
         WHERE o.status = 'completed' AND DATE(o.created_at) BETWEEN ? AND ?
-        GROUP BY c.id
+        GROUP BY u.id
         ORDER BY total_spend DESC
         LIMIT 10
     ");
@@ -313,7 +313,12 @@ include '../../includes/navbar.php';
                                                     <i class="fa-solid fa-user text-slate-400"></i>
                                                 </div>
                                                 <div>
-                                                    <div class="fw-bold text-slate-800"><?= htmlspecialchars($tc['name']) ?></div>
+                                                    <div class="fw-bold text-slate-800">
+                                                        <?= htmlspecialchars($tc['name']) ?>
+                                                        <span class="badge bg-<?= $tc['role_id'] == ROLE_DISTRIBUTOR ? 'indigo' : 'slate' ?>-50 text-<?= $tc['role_id'] == ROLE_DISTRIBUTOR ? 'indigo' : 'slate' ?>-600 border border-<?= $tc['role_id'] == ROLE_DISTRIBUTOR ? 'indigo' : 'slate' ?>-100 smaller ms-1" style="font-size: 0.6rem;">
+                                                            <?= $tc['role_id'] == ROLE_DISTRIBUTOR ? 'Distributor' : 'Customer' ?>
+                                                        </span>
+                                                    </div>
                                                     <div class="smaller text-slate-400"><?= htmlspecialchars($tc['email'] ?: $tc['phone']) ?></div>
                                                 </div>
                                             </div>

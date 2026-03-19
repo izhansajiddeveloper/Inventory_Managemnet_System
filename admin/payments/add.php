@@ -23,7 +23,7 @@ try {
         SELECT CONCAT('ORD-', o.id) as unique_id, o.id as raw_id, 'Order' as type, o.final_amount, c.name as customer_name,
                COALESCE((SELECT SUM(amount) FROM payments WHERE order_id = o.id), 0) as total_paid
         FROM orders o
-        LEFT JOIN customers c ON o.customer_id = c.id
+        LEFT JOIN users c ON o.customer_id = c.id
         WHERE o.status != 'cancelled'
         HAVING total_paid < o.final_amount
         ORDER BY o.id DESC";

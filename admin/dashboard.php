@@ -52,10 +52,7 @@ if (isset($pdo) && $pdo !== null) {
         $stats['total_products'] = (int) $pdo->query("SELECT COUNT(*) FROM products WHERE status = 'active'")->fetchColumn();
         $stats['total_orders'] = (int) $pdo->query("SELECT COUNT(*) FROM orders")->fetchColumn();
 
-        // Get customer role ID
-        $role_stmt = $pdo->query("SELECT id FROM roles WHERE name = 'customer'");
-        $customer_role_id = $role_stmt->fetchColumn();
-        $stats['total_customers'] = (int) $pdo->query("SELECT COUNT(*) FROM users WHERE role_id = " . (int)$customer_role_id)->fetchColumn();
+        $stats['total_customers'] = (int) $pdo->query("SELECT COUNT(*) FROM users WHERE role_id IN (" . ROLE_CUSTOMER . ", " . ROLE_DISTRIBUTOR . ")")->fetchColumn();
 
         // Revenue and Collected Stats
         $stats['total_revenue'] = (float) $pdo->query("SELECT COALESCE(SUM(amount), 0) FROM payments")->fetchColumn();

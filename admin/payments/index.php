@@ -25,8 +25,8 @@ $end_date = isset($_GET['end_date']) ? sanitize($_GET['end_date']) : '';
 // Base query for payments joined with orders and sales
 $query = "SELECT p.*, o.id as order_id, s.id as sale_id,
                  CASE 
-                    WHEN p.order_id IS NOT NULL THEN (SELECT name FROM customers WHERE id = o.customer_id)
-                    WHEN p.sale_id IS NOT NULL THEN (SELECT name FROM customers WHERE id = s.customer_id)
+                    WHEN p.order_id IS NOT NULL THEN (SELECT name FROM users WHERE id = o.customer_id)
+                    WHEN p.sale_id IS NOT NULL THEN (SELECT name FROM users WHERE id = s.customer_id)
                     ELSE 'Walk-in'
                  END as customer_name
           FROM payments p 
