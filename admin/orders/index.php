@@ -19,7 +19,7 @@ if (!isset($_SESSION['user_id'])) {
 }
 
 $user_role = $_SESSION['user_role'] ?? 0;
-$allowed_roles = [1]; // Admin only
+$allowed_roles = [1, 3]; // Admin and Staff
 
 if (!in_array($user_role, $allowed_roles)) {
     header("Location: " . BASE_URL . "index.php");

@@ -77,8 +77,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $order_type       = mysqli_real_escape_string($conn, $_POST['order_type'] ?? '');
     $discount         = (float)($_POST['discount'] ?? 0);
     $delivery_charges = ($order_type === 'online') ? (float)($_POST['delivery_charges'] ?? 0) : 0;
-    $payment_method   = mysqli_real_escape_string($conn, $_POST['payment_method'] ?? '');
-    $amount_paid      = (float)($_POST['amount_paid'] ?? 0);
+    $amount_paid      = 0; // Always 0 on creation now
 
     $product_ids = $_POST['product_id'] ?? [];
     $quantities  = $_POST['quantity']   ?? [];
@@ -86,7 +85,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     // 1. Basic Validation
     if (empty($product_ids)) $errors[] = "Please add at least one product.";
-    if ($amount_paid < 0)    $errors[] = "Payment amount cannot be negative.";
 
     // 2. Stock Validation + build items
     $items_to_process = [];
@@ -132,7 +130,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     $final_amount = $total_amount - $discount + $delivery_charges;
     if ($final_amount < 0)                        $errors[] = "Discount cannot exceed the total amount.";
-    if ($amount_paid > $final_amount + 0.01)      $errors[] = "Amount paid cannot exceed the order total.";
 
     // ───────────────────────────────────────────
     // 3. Execute (atomic transaction) - MySQLi doesn't support transactions well, but we'll try
@@ -145,11 +142,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $created_by = $_SESSION['user_id'] ?? 1;
 
             // ── A. Determine statuses from payment amount
-            $is_fully_paid  = ($amount_paid >= $final_amount - 0.01);
-            $has_payment    = ($amount_paid > 0);
-            $order_status   = $is_fully_paid ? 'completed' : 'pending';
-            $sale_status    = $order_status;
-            $payment_status = $is_fully_paid ? 'paid' : ($has_payment ? 'partial' : 'unpaid');
+            $order_status   = 'pending';
+            $sale_status    = 'pending';
+            $payment_status = 'unpaid';
 
             // ── B. Insert Order
             $customer_sql = $customer_id ? $customer_id : 'NULL';
@@ -194,28 +189,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 mysqli_query($conn, $sale_item_sql);
             }
 
-            // ── F. Insert Payment (if any amount provided)
-            if ($has_payment) {
-                $payment_sql = "INSERT INTO payments (order_id, sale_id, payment_method, amount, status)
-                               VALUES ($order_id, $sale_id, '$payment_method', $amount_paid, '$payment_status')";
-                mysqli_query($conn, $payment_sql);
-            }
 
             // Commit transaction
             mysqli_commit($conn);
 
-            $msg = "Order #ORD-" . str_pad($order_id, 5, '0', STR_PAD_LEFT) . " & Sale #SALE-" . str_pad($sale_id, 5, '0', STR_PAD_LEFT) . " created.";
-            $msg .= $has_payment ? " Payment: " . ucfirst($payment_status) . "." : " No payment recorded.";
+            $msg = "Order #ORD-" . str_pad($order_id, 5, '0', STR_PAD_LEFT) . " & Sale #SALE-" . str_pad($sale_id, 5, '0', STR_PAD_LEFT) . " created. Redirecting to payment...";
 
             // Set flash message in session
             $_SESSION['flash'] = ['type' => 'success', 'message' => $msg];
 
-            // POS Flow: Redirect to Sale View for shop orders, Invoice for others
-            if ($order_type === 'shop') {
-                header('Location: ' . BASE_URL . 'admin/sales/view.php?id=' . $sale_id);
-            } else {
-                header('Location: ' . BASE_URL . 'admin/orders/invoice/index.php?order_id=' . $order_id);
-            }
+            // Always redirect to payment page
+            header('Location: ' . BASE_URL . 'admin/payments/add.php?order_id=' . $order_id);
             exit();
         } catch (Exception $e) {
             mysqli_rollback($conn);
@@ -365,47 +349,10 @@ include '../../includes/navbar.php';
 
                     <hr class="my-3 border-slate-100">
 
-                    <!-- Payment -->
-                    <h6 class="fw-bold text-slate-700 mb-3 text-uppercase small tracking-wider">
-                        <i class="fa-solid fa-hand-holding-dollar me-1 text-emerald-500"></i> Payment
-                    </h6>
-
-                    <div class="mb-3">
-                        <label class="form-label small fw-bold text-slate-600">Payment Method</label>
-                        <select name="payment_method" id="paymentMethod" class="form-select border-slate-200 rounded-3 py-2">
-                            <option value="cash">Cash Payment</option>
-                            <option value="online">Online Transfer</option>
-                            <option value="bank">Bank Deposit</option>
-                            <option value="card">Card Payment</option>
-                        </select>
-                    </div>
-
-                    <div class="mb-3">
-                        <label class="form-label small fw-bold text-slate-600">Amount Received</label>
-                        <div class="input-group">
-                            <span class="input-group-text bg-light border-slate-200">Rs.</span>
-                            <input type="number" name="amount_paid" id="amountPaid" class="form-control border-slate-200" value="0" min="0" step="0.01" oninput="updateChange()">
-                        </div>
-                        <div class="form-text small text-slate-400">Enter 0 to record as unpaid</div>
-                    </div>
-
-                    <!-- Change / balance display -->
-                    <div id="changeBox" class="p-3 rounded-3 mb-3 d-none" style="background:#f0fdf4;border:1px solid #bbf7d0">
-                        <div class="d-flex justify-content-between small">
-                            <span id="changeLabel" class="fw-bold text-slate-600">Change Due</span>
-                            <span id="changeAmt" class="fw-bold text-emerald-600">Rs. 0.00</span>
-                        </div>
-                    </div>
-
-                    <div class="alert alert-info rounded-3 py-2 px-3 small mb-3">
-                        <i class="fa-solid fa-circle-info me-1"></i>
-                        A <strong>Sale record</strong> is auto-created with this order.
-                    </div>
-
                     <button type="submit" class="btn btn-dark w-100 py-3 rounded-4 fw-bold shadow-sm">
                         <i class="fa-solid fa-check-circle me-2"></i> Confirm Order & Sale
                     </button>
-                    <p class="text-center text-slate-400 small mt-2">* Stock is deducted upon confirmation</p>
+                    <p class="text-center text-slate-400 small mt-2">* You will be redirected to record payment next</p>
                 </div>
             </div>
         </div>

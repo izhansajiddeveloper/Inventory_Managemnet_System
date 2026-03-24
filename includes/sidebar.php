@@ -325,7 +325,13 @@ $user_name = isset($_SESSION['user_name']) ? $_SESSION['user_name'] : 'Guest';
 
         <!-- Dashboard Section -->
         <li class="nav-item">
-            <a href="<?= BASE_URL ?>admin/dashboard.php" class="nav-link-custom <?= ($current_page == 'dashboard.php') ? 'active' : '' ?>">
+            <?php 
+            $dashboard_url = BASE_URL;
+            if ($role_id == 1) $dashboard_url .= "admin/dashboard.php";
+            elseif ($role_id == 3) $dashboard_url .= "staff/dashboard.php";
+            else $dashboard_url .= "dashboard.php";
+            ?>
+            <a href="<?= $dashboard_url ?>" class="nav-link-custom <?= ($current_page == 'dashboard.php') ? 'active' : '' ?>">
                 <i class="fa-solid fa-house-chimney-window"></i>
                 <span>Overview</span>
             </a>
@@ -511,6 +517,92 @@ $user_name = isset($_SESSION['user_name']) ? $_SESSION['user_name'] : 'Guest';
                         <li class="submenu-item"><a href="<?= BASE_URL ?>admin/reports/customer_report.php" class="<?= ($current_page == 'customer_report.php') ? 'active' : '' ?>">Customer Insights</a></li>
                     </ul>
                 </div>
+            </li>
+
+        <?php elseif ($role_id == 3): // Staff 
+        ?>
+            <div class="nav-group-title">Operations</div>
+
+            <?php
+            $is_orders_module = (strpos($current_full_url, '/admin/orders/') !== false);
+            ?>
+            <li class="nav-item">
+                <a class="nav-link-custom <?= $is_orders_module ? 'active' : '' ?>" data-bs-toggle="collapse" data-bs-target="#ordMgmt" role="button" aria-expanded="<?= $is_orders_module ? 'true' : 'false' ?>" aria-controls="ordMgmt">
+                    <i class="fa-solid fa-cart-shopping"></i>
+                    <span>Orders</span>
+                    <i class="fa-solid fa-chevron-down chevron"></i>
+                </a>
+                <div class="collapse <?= $is_orders_module ? 'show' : '' ?>" id="ordMgmt">
+                    <ul class="submenu">
+                        <li class="submenu-item"><a href="<?= BASE_URL ?>admin/orders/index.php" class="<?= ($is_orders_module && $current_page == 'index.php') ? 'active' : '' ?>">Order List</a></li>
+                        <li class="submenu-item"><a href="<?= BASE_URL ?>admin/orders/create.php" class="<?= ($is_orders_module && $current_page == 'create.php') ? 'active' : '' ?>">Create New Order</a></li>
+                    </ul>
+                </div>
+            </li>
+
+            <?php
+            $is_payments_module = (strpos($current_full_url, '/admin/payments/') !== false);
+            ?>
+            <li class="nav-item">
+                <a class="nav-link-custom <?= $is_payments_module ? 'active' : '' ?>" data-bs-toggle="collapse" data-bs-target="#payMgmt" role="button" aria-expanded="<?= $is_payments_module ? 'true' : 'false' ?>" aria-controls="payMgmt">
+                    <i class="fa-solid fa-file-invoice-dollar"></i>
+                    <span>Payments</span>
+                    <i class="fa-solid fa-chevron-down chevron"></i>
+                </a>
+                <div class="collapse <?= $is_payments_module ? 'show' : '' ?>" id="payMgmt">
+                    <ul class="submenu">
+                        <li class="submenu-item"><a href="<?= BASE_URL ?>admin/payments/index.php" class="<?= ($is_payments_module && $current_page == 'index.php') ? 'active' : '' ?>">Payment History</a></li>
+                        <li class="submenu-item"><a href="<?= BASE_URL ?>admin/payments/add.php" class="<?= ($is_payments_module && $current_page == 'add.php') ? 'active' : '' ?>">Record Payment</a></li>
+                    </ul>
+                </div>
+            </li>
+
+            <?php
+            $is_sales_module = (strpos($current_full_url, '/admin/sales/') !== false);
+            ?>
+            <li class="nav-item">
+                <a class="nav-link-custom <?= $is_sales_module ? 'active' : '' ?>" data-bs-toggle="collapse" data-bs-target="#saleMgmt" role="button" aria-expanded="<?= $is_sales_module ? 'true' : 'false' ?>" aria-controls="saleMgmt">
+                    <i class="fa-solid fa-receipt"></i>
+                    <span>Sales Management</span>
+                    <i class="fa-solid fa-chevron-down chevron"></i>
+                </a>
+                <div class="collapse <?= $is_sales_module ? 'show' : '' ?>" id="saleMgmt">
+                    <ul class="submenu">
+                        <li class="submenu-item"><a href="<?= BASE_URL ?>admin/sales/index.php" class="<?= ($is_sales_module && $current_page == 'index.php') ? 'active' : '' ?>">Sales Dashboard</a></li>
+                        <li class="submenu-item"><a href="<?= BASE_URL ?>admin/orders/create.php" class="<?= ($is_sales_module && $current_page == 'create.php') ? 'active' : '' ?>">New Sale / Order</a></li>
+                    </ul>
+                </div>
+            </li>
+
+        <?php elseif ($role_id == 3): // Staff (Sale Person) 
+        ?>
+            <div class="nav-group-title">Operations</div>
+
+            <!-- Orders -->
+            <?php $is_orders_module = (strpos($current_full_url, '/admin/orders/') !== false); ?>
+            <li class="nav-item">
+                <a class="nav-link-custom <?= $is_orders_module ? 'active' : '' ?>" href="<?= BASE_URL ?>admin/orders/index.php">
+                    <i class="fa-solid fa-shopping-cart"></i>
+                    <span>Orders</span>
+                </a>
+            </li>
+
+            <!-- Payments -->
+            <?php $is_payments_module = (strpos($current_full_url, '/admin/payments/') !== false); ?>
+            <li class="nav-item">
+                <a class="nav-link-custom <?= $is_payments_module ? 'active' : '' ?>" href="<?= BASE_URL ?>admin/payments/index.php">
+                    <i class="fa-solid fa-hand-holding-dollar"></i>
+                    <span>Payments</span>
+                </a>
+            </li>
+
+            <!-- Sales -->
+            <?php $is_sales_module = (strpos($current_full_url, '/admin/sales/') !== false); ?>
+            <li class="nav-item">
+                <a class="nav-link-custom <?= $is_sales_module ? 'active' : '' ?>" href="<?= BASE_URL ?>admin/sales/index.php">
+                    <i class="fa-solid fa-receipt"></i>
+                    <span>Sale</span>
+                </a>
             </li>
 
         <?php endif; ?>
