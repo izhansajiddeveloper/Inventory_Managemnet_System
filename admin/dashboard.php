@@ -214,21 +214,20 @@ if (isset($conn) && $conn !== null) {
         }
     }
 
-    // Distributor Stats
+    // Distributor Buying Stats (Top Buyers)
     $result = mysqli_query($conn, "
         SELECT 
             d.id,
             d.company_name,
             u.name as contact_person,
-            COUNT(DISTINCT pu.id) as total_purchases,
-            COALESCE(SUM(pu.total_amount), 0) as purchase_value,
-            COUNT(DISTINCT pi.product_id) as products_supplied
+            COUNT(DISTINCT o.id) as total_orders,
+            COALESCE(SUM(o.final_amount), 0) as order_volume,
+            COALESCE((SELECT SUM(pm.amount) FROM payments pm JOIN orders o2 ON pm.order_id = o2.id WHERE o2.customer_id = u.id), 0) as total_paid
         FROM distributors d
         JOIN users u ON d.user_id = u.id
-        LEFT JOIN purchases pu ON d.id = pu.distributor_id
-        LEFT JOIN purchase_items pi ON pu.id = pi.purchase_id
+        LEFT JOIN orders o ON u.id = o.customer_id
         GROUP BY d.id
-        ORDER BY purchase_value DESC
+        ORDER BY order_volume DESC
         LIMIT 5
     ");
     if ($result) {
@@ -1122,10 +1121,10 @@ include __DIR__ . '/../includes/navbar.php';
                 <tr>
                     <th>Company</th>
                     <th>Contact Person</th>
-                    <th>Products Supplied</th>
-                    <th>Total Purchases</th>
-                    <th>Purchase Value</th>
-                    <th>Performance</th>
+                    <th>Total Orders</th>
+                    <th>Order Volume</th>
+                    <th>Total Paid</th>
+                    <th>Payment %</th>
                 </tr>
             </thead>
             <tbody>
@@ -1138,17 +1137,22 @@ include __DIR__ . '/../includes/navbar.php';
                         <tr>
                             <td style="font-weight: 600;"><?= htmlspecialchars($dist['company_name'] ?? 'N/A') ?></td>
                             <td><?= htmlspecialchars($dist['contact_person'] ?? 'N/A') ?></td>
-                            <td><?= number_format($dist['products_supplied'] ?? 0) ?></td>
-                            <td><?= number_format($dist['total_purchases'] ?? 0) ?></td>
-                            <td style="font-weight: 600;"><?= CURRENCY_SYMBOL ?><?= number_format($dist['purchase_value'] ?? 0, 2) ?></td>
+                            <td><?= number_format($dist['total_orders'] ?? 0) ?> Orders</td>
+                            <td style="font-weight: 600;"><?= CURRENCY_SYMBOL ?><?= number_format($dist['order_volume'] ?? 0, 2) ?></td>
+                            <td class="text-success fw-bold"><?= CURRENCY_SYMBOL ?><?= number_format($dist['total_paid'] ?? 0, 2) ?></td>
                             <td>
+                                <?php 
+                                $vol = $dist['order_volume'] ?? 0;
+                                $paid = $dist['total_paid'] ?? 0;
+                                $perc = $vol > 0 ? min(100, ($paid / $vol) * 100) : 0;
+                                ?>
                                 <div style="display: flex; align-items: center; gap: 8px;">
                                     <div style="flex: 1; height: 6px; background: var(--light); border-radius: 3px;">
-                                        <div class="progress-bar-fill progress-fill-primary"
-                                            style="width: <?= min(100, (($dist['purchase_value'] ?? 0) / 100000) * 100) ?>%; height: 6px;"></div>
+                                        <div class="progress-bar-fill progress-fill-<?= $perc >= 100 ? 'success' : 'primary' ?>"
+                                            style="width: <?= $perc ?>%; height: 6px;"></div>
                                     </div>
                                     <span style="font-size: 12px; font-weight: 600;">
-                                        <?= round((($dist['purchase_value'] ?? 0) / 100000) * 100) ?>%
+                                        <?= round($perc) ?>%
                                     </span>
                                 </div>
                             </td>

@@ -329,6 +329,7 @@ $user_name = isset($_SESSION['user_name']) ? $_SESSION['user_name'] : 'Guest';
             $dashboard_url = BASE_URL;
             if ($role_id == 1) $dashboard_url .= "admin/dashboard.php";
             elseif ($role_id == 3) $dashboard_url .= "staff/dashboard.php";
+            elseif ($role_id == 2) $dashboard_url .= "distributor/dashboard.php";
             else $dashboard_url .= "dashboard.php";
             ?>
             <a href="<?= $dashboard_url ?>" class="nav-link-custom <?= ($current_page == 'dashboard.php') ? 'active' : '' ?>">
@@ -602,6 +603,34 @@ $user_name = isset($_SESSION['user_name']) ? $_SESSION['user_name'] : 'Guest';
                 <a class="nav-link-custom <?= $is_sales_module ? 'active' : '' ?>" href="<?= BASE_URL ?>admin/sales/index.php">
                     <i class="fa-solid fa-receipt"></i>
                     <span>Sale</span>
+                </a>
+            </li>
+
+        <?php elseif ($role_id == 2): // Distributor 
+        ?>
+            <div class="nav-group-title">My Portal</div>
+
+            <!-- Orders -->
+            <li class="nav-item">
+                <a class="nav-link-custom" href="<?= BASE_URL ?>distributor/orders.php">
+                    <i class="fa-solid fa-shopping-cart"></i>
+                    <span>My Orders</span>
+                </a>
+            </li>
+
+            <!-- Payments -->
+            <li class="nav-item">
+                <a class="nav-link-custom" href="<?= BASE_URL ?>distributor/payments.php">
+                    <i class="fa-solid fa-hand-holding-dollar"></i>
+                    <span>My Payments</span>
+                </a>
+            </li>
+
+            <!-- Sales -->
+            <li class="nav-item">
+                <a class="nav-link-custom" href="<?= BASE_URL ?>distributor/sales.php">
+                    <i class="fa-solid fa-receipt"></i>
+                    <span>My Sales</span>
                 </a>
             </li>
 
