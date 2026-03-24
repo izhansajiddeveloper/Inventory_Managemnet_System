@@ -134,14 +134,22 @@ if (isset($conn) && $conn !== null) {
         }
     }
 
-    // Category Stats
+    // Category Stats (Using same logic as admin dashboard)
     $result = mysqli_query($conn, "
         SELECT 
-            'Category' as category,
+            CASE 
+                WHEN p.id % 5 = 0 THEN 'Electronics'
+                WHEN p.id % 5 = 1 THEN 'Clothing'
+                WHEN p.id % 5 = 2 THEN 'Accessories'
+                WHEN p.id % 5 = 3 THEN 'Footwear'
+                ELSE 'Home & Living'
+            END as category,
             COALESCE(SUM(oi.total), 0) as revenue
-        FROM order_items oi
+        FROM products p
+        JOIN order_items oi ON p.id = oi.product_id
         JOIN orders o ON oi.order_id = o.id AND o.status = 'completed'
-        LIMIT 5
+        GROUP BY category
+        ORDER BY revenue DESC
     ");
     if ($result) {
         while ($row = mysqli_fetch_assoc($result)) {
@@ -149,33 +157,30 @@ if (isset($conn) && $conn !== null) {
         }
     }
 
-    // Monthly Stats
-    $monthly_stats = [[
-        'month' => date('M'),
-        'revenue' => $stats['total_revenue'],
-        'profit' => $stats['total_profit']
-    ]];
-}
-
-// Fallback mock data if empty
-if (empty($category_stats)) {
-    $category_stats = [
-        ['category' => 'Electronics', 'revenue' => 45000],
-        ['category' => 'Clothing', 'revenue' => 38000],
-        ['category' => 'Accessories', 'revenue' => 22000]
-    ];
-}
-if (count($monthly_stats) < 2) {
-    $months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun'];
-    $monthly_stats = [];
-    foreach ($months as $month) {
-        $monthly_stats[] = [
-            'month' => $month,
-            'revenue' => rand(50000, 150000),
-            'profit' => rand(15000, 45000)
-        ];
+    // Monthly Revenue Stats (Last 6 Months)
+    $result = mysqli_query($conn, "
+        SELECT 
+            DATE_FORMAT(created_at, '%b') as month,
+            SUM(amount) as revenue
+        FROM payments
+        WHERE created_at >= DATE_SUB(CURDATE(), INTERVAL 6 MONTH)
+        GROUP BY DATE_FORMAT(created_at, '%Y-%m')
+        ORDER BY created_at ASC
+    ");
+    if ($result && mysqli_num_rows($result) > 0) {
+        $monthly_stats = [];
+        while ($row = mysqli_fetch_assoc($result)) {
+            $monthly_stats[] = $row;
+        }
+    } else {
+        // Fallback if no payment history
+        $monthly_stats = [[
+            'month' => date('M'),
+            'revenue' => $stats['total_revenue']
+        ]];
     }
 }
+
 
 // Helper function for time ago
 function timeAgo($datetime) {

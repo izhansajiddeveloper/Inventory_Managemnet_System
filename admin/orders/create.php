@@ -452,28 +452,8 @@ include '../../includes/navbar.php';
         document.getElementById('displayFinal').innerText = 'Rs. ' + final.toLocaleString(undefined, {
             minimumFractionDigits: 2
         });
-        updateChange();
     }
 
-    function updateChange() {
-        const finalText = document.getElementById('displayFinal').innerText;
-        const total = parseFloat(finalText.replace('Rs. ', '').replace(/,/g, '')) || 0;
-        const paid = parseFloat(document.getElementById('amountPaid').value) || 0;
-        const box = document.getElementById('changeBox');
-        if (paid > 0) {
-            box.classList.remove('d-none');
-            const diff = paid - total;
-            document.getElementById('changeLabel').textContent = diff >= 0 ? 'Change Due' : 'Balance Remaining';
-            document.getElementById('changeAmt').className = diff >= 0 ? 'fw-bold text-emerald-600' : 'fw-bold text-rose-600';
-            document.getElementById('changeAmt').innerText = 'Rs. ' + Math.abs(diff).toLocaleString(undefined, {
-                minimumFractionDigits: 2
-            });
-            box.style.background = diff >= 0 ? '#f0fdf4' : '#fef2f2';
-            box.style.borderColor = diff >= 0 ? '#bbf7d0' : '#fecaca';
-        } else {
-            box.classList.add('d-none');
-        }
-    }
 
     // Toggle delivery field
     document.getElementById('orderType').addEventListener('change', function() {
