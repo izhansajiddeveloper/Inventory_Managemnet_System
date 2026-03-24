@@ -382,6 +382,8 @@ include __DIR__ . '/../includes/navbar.php';
                     data: <?= json_encode(array_column($monthly_stats, 'revenue')) ?>,
                     backgroundColor: '#2563eb',
                     borderRadius: 8,
+                    barPercentage: 0.5,
+                    categoryPercentage: 0.6
                 }]
             },
             options: { responsive: true, maintainAspectRatio: false }
