@@ -23,6 +23,6 @@ if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
 
-// Base URL configuration - FIXED to match your actual folder name
-define('BASE_URL', 'http://localhost/inventory-management-system/');
+// Base URL configuration - Updated for inventory_management_system
+define('BASE_URL', 'http://localhost/inventory_management_system/');
 define('BASE_PATH', dirname(__DIR__));
